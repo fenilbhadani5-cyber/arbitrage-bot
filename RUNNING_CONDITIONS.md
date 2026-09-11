@@ -314,3 +314,4 @@ If one side of a concurrent order pair fills but the other fails:
 | Fill poll interval | 50ms (max 10 attempts = 500ms) |
 | WebSocket ping | 20s |
 | Dead connection timeout | 30s |
+# Synced with Tokyo AWS EC2
