@@ -1,0 +1,26 @@
+# Build output
+/target/
+**/target/
+live_trading/target/
+
+# Sensitive keys and secrets — NEVER COMMIT
+keys.env
+.env
+*.env
+*.pem
+*.key
+
+# Archives and build artifacts
+*.zip
+*.tar.gz
+
+# Trade logs & debug logs
+*.jsonl
+*.log
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
