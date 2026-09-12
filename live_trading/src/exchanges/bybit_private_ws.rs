@@ -1,19 +1,23 @@
 /// Bybit V5 private WebSocket client.
 ///
 /// Subscribes to private topics which deliver:
-///   - execution  → instantly notifies when an order fills
+///   - execution  → instantly notifies when an order fills (fires per-fill, fastest path)
+///   - order      → order status updates (terminal states: Filled, Cancelled, Expired)
 ///   - wallet     → instantly updates USDT balance
 ///
-/// This completely replaces the REST fill-poll loop (was 50ms × 10 = up to 500ms).
-/// Fill notifications now arrive in ~5–20ms via push.
+/// IMPORTANT: We subscribe to BOTH "execution" AND "order" topics:
+///   - "execution" fires per fill execution (~5-20ms) — fast path for fills
+///   - "order" fires at terminal status — catches Cancelled/Expired 0-fill events
+///   - "wallet" updates balance in real-time
 ///
 /// Protocol:
 ///   1. Connect wss://stream.bybit.com/v5/private
 ///   2. Send auth: {"op":"auth","args":[apiKey, expires, signature]}
-///   3. Subscribe: {"op":"subscribe","args":["execution","wallet"]}
-///   4. Parse execution events → resolve pending fill channel
-///   5. Parse wallet events    → update live balance
-///   6. Respond to ping with pong to keep connection alive
+///   3. Subscribe: {"op":"subscribe","args":["execution","order","wallet"]}
+///   4. Parse execution events → resolve pending fill channel (fast path)
+///   5. Parse order events     → fast-fail on Cancelled/Expired with 0 fill
+///   6. Parse wallet events    → update live balance
+///   7. Respond to ping with pong to keep connection alive
 
 use super::fill_channel::{FillEvent, LiveBalance, PendingFillMap};
 use futures_util::{SinkExt, StreamExt};
@@ -38,7 +42,41 @@ struct AnyMsg {
     success: bool,
 }
 
-/// Order event data item.
+/// Execution event data item ("execution" topic — fires per trade execution, FAST).
+/// This is the primary fill notification path (~5-20ms after fill).
+#[derive(Debug, Deserialize)]
+#[allow(non_snake_case, dead_code)]
+struct BybitExecEv {
+    #[serde(default)]
+    pub orderId:      String,
+    #[serde(default)]
+    pub orderLinkId:  String,
+    #[serde(default)]
+    pub symbol:       String,
+    #[serde(default)]
+    pub side:         String,
+    #[serde(default)]
+    pub execPrice:    String,  // price of THIS execution
+    #[serde(default)]
+    pub execQty:      String,  // qty of THIS execution
+    #[serde(default)]
+    pub execValue:    String,  // notional of THIS execution
+    #[serde(default)]
+    pub execFee:      String,  // fee for THIS execution
+    #[serde(default)]
+    pub execTime:     String,  // execution timestamp (ms)
+    #[serde(default)]
+    pub execType:     String,  // "Trade", "Funding", etc.
+    #[serde(default)]
+    pub closedSize:   String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExecEvMsg {
+    data: Vec<BybitExecEv>,
+}
+
+/// Order event data item ("order" topic — fires at terminal status, used for fast-fail).
 #[derive(Debug, Deserialize)]
 #[allow(non_snake_case, dead_code)]
 struct BybitOrderEv {
@@ -172,9 +210,12 @@ pub async fn run(
     }
 
     // ── Step 2: Subscribe to topics ──────────────────────────────────────
+    // IMPORTANT: Subscribe to "execution" (instant per-fill events) AND "order" (terminal
+    // status events for Cancelled/Expired 0-fill fast-fail) AND "wallet" (balance updates).
+    // "execution" is the PRIMARY fill path (~5-20ms). "order" catches 0-fill terminations.
     let sub_msg = serde_json::json!({
         "op": "subscribe",
-        "args": ["order", "wallet"]
+        "args": ["execution", "order", "wallet"]
     });
 
     if let Err(e) = ws.send(Message::Text(sub_msg.to_string())).await {
@@ -182,7 +223,7 @@ pub async fn run(
         return;
     }
 
-    eprintln!("[BybitPrivateWS] Connected — listening for fills and balance updates");
+    eprintln!("[BybitPrivateWS] Connected — subscribed to execution+order+wallet topics");
 
     // ── Step 4: Main message loop ─────────────────────────────────────────
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(20));
@@ -231,54 +272,110 @@ pub async fn run(
                 }
 
                 match msg_meta.topic.as_str() {
-                    "order" => {
-                        match serde_json::from_str::<OrderEvMsg>(&text) {
+                    "execution" => {
+                        // PRIMARY FILL PATH: fires per-fill in ~5-20ms
+                        match serde_json::from_str::<ExecEvMsg>(&text) {
                             Ok(ev) => {
                                 for o in ev.data {
-                                    // Wait for terminal state to capture cumulative totals correctly
-                                    if o.orderStatus != "Filled" && o.orderStatus != "PartiallyFilledCanceled" && o.orderStatus != "Cancelled" && o.orderStatus != "Rejected" && o.orderStatus != "Expired" {
+                                    // Only process actual trade executions
+                                    if o.execType != "Trade" && !o.execType.is_empty() {
                                         continue;
                                     }
 
-                                    let avg_price   = o.avgPrice.parse::<f64>().unwrap_or(0.0);
-                                    let filled_qty  = o.cumExecQty.parse::<f64>().unwrap_or(0.0);
-                                    let quote_qty   = o.cumExecValue.parse::<f64>().unwrap_or(0.0);
-                                    let commission  = o.cumExecFee.parse::<f64>().unwrap_or(0.0).abs();
-                                    let ts          = o.updatedTime.parse::<u64>().unwrap_or(0);
+                                    let avg_price  = o.execPrice.parse::<f64>().unwrap_or(0.0);
+                                    let filled_qty = o.execQty.parse::<f64>().unwrap_or(0.0);
+                                    let quote_qty  = o.execValue.parse::<f64>().unwrap_or(0.0);
+                                    let commission = o.execFee.parse::<f64>().unwrap_or(0.0).abs();
+                                    let ts         = o.execTime.parse::<u64>().unwrap_or(0);
 
                                     eprintln!(
-                                        "[BybitPrivateWS] Order terminal ({}): order={} linkId={} qty={} avgPrice={} fee={}",
-                                        o.orderStatus, o.orderId, o.orderLinkId, filled_qty, avg_price, commission
+                                        "[BybitPrivateWS] Execution (FAST): order={} linkId={} qty={} execPrice={} fee={}",
+                                        o.orderId, o.orderLinkId, filled_qty, avg_price, commission
                                     );
 
                                     // Match on orderLinkId first (our pre-registered key),
-                                    // then fall back to orderId for any legacy/manual orders.
-                                    let matched_key = if !o.orderLinkId.is_empty() {
-                                        if pending_fills.contains_key(&o.orderLinkId) {
-                                            o.orderLinkId.clone()
-                                        } else {
-                                            o.orderId.clone()
-                                        }
-                                    } else {
+                                    // then fall back to orderId
+                                    let matched_key = if !o.orderLinkId.is_empty()
+                                        && pending_fills.contains_key(&o.orderLinkId)
+                                    {
+                                        o.orderLinkId.clone()
+                                    } else if pending_fills.contains_key(&o.orderId) {
                                         o.orderId.clone()
+                                    } else {
+                                        // No pending fill registered — already resolved or stale
+                                        eprintln!("[BybitPrivateWS] No pending fill for linkId={} orderId={}", o.orderLinkId, o.orderId);
+                                        continue;
                                     };
 
-                                    // Deliver fill to waiting execute_order_with_fill().
-                                    // Set is_expired=true for Cancelled/Expired 0-fill so caller fast-fails
-                                    // via WS in ~20ms instead of hitting the 500ms timeout.
-                                    let is_expired = (o.orderStatus == "Cancelled" || o.orderStatus == "Expired"
-                                        || o.orderStatus == "PartiallyFilledCanceled" || o.orderStatus == "Rejected")
-                                        && filled_qty == 0.0;
-
-                                    // Deliver fill to waiting execute_order_with_fill()
                                     if let Some((_, sender)) = pending_fills.remove(&matched_key) {
                                         let _ = sender.send(FillEvent {
-                                            order_id:   o.orderId,
+                                            order_id:  o.orderId,
                                             avg_price,
                                             filled_qty,
                                             quote_qty,
                                             commission,
-                                            timestamp:   ts,
+                                            timestamp: ts,
+                                            is_expired: false, // execution topic only fires for actual fills
+                                        });
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[BybitPrivateWS] Failed to parse execution event: {} | raw: {}", e, text);
+                            }
+                        }
+                    }
+
+                    "order" => {
+                        // SECONDARY PATH: terminal status events — used ONLY for fast-fail on
+                        // Cancelled/Expired with 0 fill. Filled orders are caught by "execution" above.
+                        match serde_json::from_str::<OrderEvMsg>(&text) {
+                            Ok(ev) => {
+                                for o in ev.data {
+                                    // Only process terminal states
+                                    if o.orderStatus != "Filled" && o.orderStatus != "PartiallyFilledCanceled"
+                                        && o.orderStatus != "Cancelled" && o.orderStatus != "Rejected"
+                                        && o.orderStatus != "Expired" {
+                                        continue;
+                                    }
+
+                                    let avg_price  = o.avgPrice.parse::<f64>().unwrap_or(0.0);
+                                    let filled_qty = o.cumExecQty.parse::<f64>().unwrap_or(0.0);
+                                    let quote_qty  = o.cumExecValue.parse::<f64>().unwrap_or(0.0);
+                                    let commission = o.cumExecFee.parse::<f64>().unwrap_or(0.0).abs();
+                                    let ts         = o.updatedTime.parse::<u64>().unwrap_or(0);
+
+                                    // Check if this is a 0-fill termination that needs fast-fail
+                                    let is_expired = (o.orderStatus == "Cancelled" || o.orderStatus == "Expired"
+                                        || o.orderStatus == "PartiallyFilledCanceled" || o.orderStatus == "Rejected")
+                                        && filled_qty == 0.0;
+
+                                    eprintln!(
+                                        "[BybitPrivateWS] Order terminal ({}): order={} linkId={} qty={} is_expired={}",
+                                        o.orderStatus, o.orderId, o.orderLinkId, filled_qty, is_expired
+                                    );
+
+                                    // Only act on this if pending fill still exists
+                                    // (execution topic may have already resolved it)
+                                    let matched_key = if !o.orderLinkId.is_empty()
+                                        && pending_fills.contains_key(&o.orderLinkId)
+                                    {
+                                        o.orderLinkId.clone()
+                                    } else if pending_fills.contains_key(&o.orderId) {
+                                        o.orderId.clone()
+                                    } else {
+                                        // Already resolved by execution topic — skip
+                                        continue;
+                                    };
+
+                                    if let Some((_, sender)) = pending_fills.remove(&matched_key) {
+                                        let _ = sender.send(FillEvent {
+                                            order_id:  o.orderId,
+                                            avg_price,
+                                            filled_qty,
+                                            quote_qty,
+                                            commission,
+                                            timestamp: ts,
                                             is_expired,
                                         });
                                     }

@@ -30,7 +30,7 @@ pub const MAX_BOOK_AGE_MILLIS: u128 = 2000;
 pub const MAX_ALLOWED_SLIPPAGE_PCT: f64 = 0.35;
 
 /// Spread % at which to CLOSE an open position (spread has converged).
-pub const EXIT_SPREAD_THRESHOLD: f64 = 0.1;
+pub const EXIT_SPREAD_THRESHOLD: f64 = 0.3;
 
 /// Cooldown between opening trades on the same coin (seconds).
 pub const TRADE_COOLDOWN_SECS: i64 = 5;
@@ -38,8 +38,8 @@ pub const TRADE_COOLDOWN_SECS: i64 = 5;
 
 
 /// Maximum seconds to hold a position before force-closing.
-/// Arbitrage spreads converge in 1-5 seconds. Holding longer exposes to directional risk.
-pub const MAX_HOLD_SECS: i64 = 10;
+/// Set to 0 to disable timeout completely and hold indefinitely until spread converges below exit threshold.
+pub const MAX_HOLD_SECS: i64 = 0;
 
 /// Maximum number of concurrent open arbitrage positions.
 /// Set to 1 for safe real-money testing — only 1 position open at a time.

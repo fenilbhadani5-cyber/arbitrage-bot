@@ -132,6 +132,14 @@ impl LiveTradingEngine {
         }
     }
 
+    /// Pings the REST APIs to keep the HTTP connection pool warm.
+    /// Eliminates the TCP/TLS handshake latency for the next trade.
+    pub async fn ping_keepalives(&self) {
+        let bin_fut = self.binance_client.ping_keepalive();
+        let byb_fut = self.bybit_client.ping_keepalive();
+        tokio::join!(bin_fut, byb_fut);
+    }
+
     /// Helper to safely round quantities based on price magnitude to avoid exchange lot size errors.
     /// Falls back to heuristic if exchange metadata is not available.
     pub fn round_quantity(quantity: f64, price: f64) -> f64 {
@@ -813,6 +821,7 @@ impl LiveTradingEngine {
                                 self.emergency_halt = true;
                             }
                         }
+                        self.last_trade_time.insert(coin.to_string(), Utc::now());
                         return false;
                     }
                     (Err(e), Ok(sf)) => {
@@ -848,6 +857,7 @@ impl LiveTradingEngine {
                                 self.emergency_halt = true;
                             }
                         }
+                        self.last_trade_time.insert(coin.to_string(), Utc::now());
                         return false;
                     }
                     (Err(e1), Err(e2)) => {
@@ -870,6 +880,7 @@ impl LiveTradingEngine {
                             Some(latency.clone()),
                         );
                         self.emergency_halt = true;
+                        self.last_trade_time.insert(coin.to_string(), Utc::now());
                         return false;
                     }
                 }
@@ -927,6 +938,7 @@ impl LiveTradingEngine {
                                 self.emergency_halt = true;
                             }
                         }
+                        self.last_trade_time.insert(coin.to_string(), Utc::now());
                         return false;
                     }
                     (Err(e), Ok(sf)) => {
@@ -962,6 +974,7 @@ impl LiveTradingEngine {
                                 self.emergency_halt = true;
                             }
                         }
+                        self.last_trade_time.insert(coin.to_string(), Utc::now());
                         return false;
                     }
                     (Err(e1), Err(e2)) => {
@@ -984,6 +997,7 @@ impl LiveTradingEngine {
                             Some(latency.clone()),
                         );
                         self.emergency_halt = true;
+                        self.last_trade_time.insert(coin.to_string(), Utc::now());
                         return false;
                     }
                 }
@@ -1338,7 +1352,7 @@ impl LiveTradingEngine {
                         for attempt in 1..=MAX_CLOSE_RETRIES {
                             tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
                             eprintln!("[LiveTrading] Retry {}/{}: BUY {} on Bybit", attempt, MAX_CLOSE_RETRIES, coin);
-                            match self.bybit_client.execute_order_with_fill(&symbol, "Buy", close_sell_qty, true, worst_buy_close).await {
+                            match self.bybit_client.execute_order_with_fill(&symbol, "Buy", close_sell_qty, true, None).await {
                                 Ok(bf) => { recovered = Some(close_from_bybit(&bf)); break; }
                                 Err(e) => eprintln!("[LiveTrading] Retry {} failed: {}", attempt, e),
                             }
@@ -1362,7 +1376,7 @@ impl LiveTradingEngine {
                         for attempt in 1..=MAX_CLOSE_RETRIES {
                             tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
                             eprintln!("[LiveTrading] Retry {}/{}: SELL {} on Binance", attempt, MAX_CLOSE_RETRIES, coin);
-                            match self.binance_client.execute_order_with_fill(&symbol, "SELL", close_buy_qty, true, worst_sell_close).await {
+                            match self.binance_client.execute_order_with_fill(&symbol, "SELL", close_buy_qty, true, None).await {
                                 Ok(sf) => { recovered = Some(close_from_binance(&sf)); break; }
                                 Err(e) => eprintln!("[LiveTrading] Retry {} failed: {}", attempt, e),
                             }
@@ -1401,7 +1415,7 @@ impl LiveTradingEngine {
                         for attempt in 1..=MAX_CLOSE_RETRIES {
                             tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
                             eprintln!("[LiveTrading] Retry {}/{}: BUY {} on Binance", attempt, MAX_CLOSE_RETRIES, coin);
-                            match self.binance_client.execute_order_with_fill(&symbol, "BUY", close_sell_qty, true, worst_buy_close).await {
+                            match self.binance_client.execute_order_with_fill(&symbol, "BUY", close_sell_qty, true, None).await {
                                 Ok(bf) => { recovered = Some(close_from_binance(&bf)); break; }
                                 Err(e) => eprintln!("[LiveTrading] Retry {} failed: {}", attempt, e),
                             }
@@ -1424,7 +1438,7 @@ impl LiveTradingEngine {
                         for attempt in 1..=MAX_CLOSE_RETRIES {
                             tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
                             eprintln!("[LiveTrading] Retry {}/{}: SELL {} on Bybit", attempt, MAX_CLOSE_RETRIES, coin);
-                            match self.bybit_client.execute_order_with_fill(&symbol, "Sell", close_buy_qty, true, worst_sell_close).await {
+                            match self.bybit_client.execute_order_with_fill(&symbol, "Sell", close_buy_qty, true, None).await {
                                 Ok(sf) => { recovered = Some(close_from_bybit(&sf)); break; }
                                 Err(e) => eprintln!("[LiveTrading] Retry {} failed: {}", attempt, e),
                             }
@@ -1603,8 +1617,20 @@ pub async fn run_trading_loop(
     use crate::price_store::{compute_spread_from_fresh, fresh_prices};
     use std::sync::atomic::Ordering;
 
-    // Reduced from 500ms to 100ms for faster reaction to spreads
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+    // Reduced from 100ms to 2ms for near-instant reaction to spreads (<5ms latency target)
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(2));
+
+    // Keep HTTP connection pool warm by pinging REST endpoints every 10 seconds
+    let engine_for_keepalive = engine.clone();
+    tokio::spawn(async move {
+        let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            keepalive_interval.tick().await;
+            let eng = engine_for_keepalive.lock().await;
+            eng.ping_keepalives().await;
+        }
+    });
+
 
     // Refresh balances on startup
     {
@@ -1727,17 +1753,14 @@ pub async fn run_trading_loop(
                     if bp > 0.0 && sp > 0.0 {
                         let current_spread = ((sp - bp) / bp) * 100.0;
                         
-                        // Calculate dynamic close threshold based on entry spread.
-                        // We want to capture 70% of the spread (leave 30% on the table)
-                        // Or if the spread was very wide, use the static config.
-                        let target_close = (pos.entry_spread * 0.3).min(EXIT_SPREAD_THRESHOLD);
-
                         // Instant close conditions:
-                        // 1. Spread converged to target
-                        // 2. OR Max hold time exceeded (get out before directional exposure kills us)
-                        if current_spread <= target_close || hold_secs >= MAX_HOLD_SECS {
+                        // 1. Spread converged to exit threshold (<= EXIT_SPREAD_THRESHOLD)
+                        // 2. OR Max hold time exceeded (only if MAX_HOLD_SECS > 0)
+                        let target_close = EXIT_SPREAD_THRESHOLD;
+                        let timeout_exceeded = MAX_HOLD_SECS > 0 && hold_secs >= MAX_HOLD_SECS;
+                        if current_spread <= target_close || timeout_exceeded {
                             close_candidates.push((coin.clone(), current_spread));
-                            if hold_secs >= MAX_HOLD_SECS {
+                            if timeout_exceeded {
                                 eprintln!("[LiveTrading] MAX HOLD EXCEEDED: {} held for {}s (spread {:.3}%)", coin, hold_secs, current_spread);
                             }
                         }

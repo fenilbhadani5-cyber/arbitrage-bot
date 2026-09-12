@@ -248,8 +248,11 @@ pub async fn run(
                             && pending_fills.contains_key(&o.client_order_id)
                         {
                             o.client_order_id.clone()
-                        } else {
+                        } else if pending_fills.contains_key(&order_id_str) {
                             order_id_str.clone()
+                        } else {
+                            eprintln!("[BinancePrivateWS] No pending fill for clientId={} orderId={} — already resolved or stale", o.client_order_id, order_id_str);
+                            continue;
                         };
 
                         // Deliver fill to waiting execute_order_with_fill().
@@ -257,6 +260,10 @@ pub async fn run(
                         // can fast-fail in ~20ms instead of hitting the 500ms timeout.
                         let is_expired = (o.status == "EXPIRED" || o.status == "CANCELED" || o.status == "REJECTED")
                             && filled_qty == 0.0;
+
+                        if is_expired {
+                            eprintln!("[BinancePrivateWS] FAST-FAIL: order={} is_expired=true (status={}, qty=0) — resolving immediately", order_id_str, o.status);
+                        }
 
                         if let Some((_, sender)) = pending_fills.remove(&matched_key) {
                             let _ = sender.send(FillEvent {

@@ -1,5 +1,6 @@
 pub mod fill_channel;
 pub mod binance_private_ws;
+pub mod binance_trade_ws;
 pub mod bybit_private_ws;
 pub mod binance_feed;
 pub mod bybit_feed;

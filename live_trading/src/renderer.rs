@@ -142,9 +142,17 @@ pub async fn run(
     loop {
         let mut key_pressed = false;
 
-        if event::poll(Duration::from_millis(30)).unwrap_or(false) {
-            if let Ok(Event::Key(KeyEvent { code, modifiers, kind, .. })) = event::read() {
-                if kind == crossterm::event::KeyEventKind::Press || kind == crossterm::event::KeyEventKind::Repeat {
+        let key_event = tokio::task::spawn_blocking(|| {
+            if event::poll(Duration::from_millis(30)).unwrap_or(false) {
+                if let Ok(Event::Key(k)) = event::read() {
+                    return Some(k);
+                }
+            }
+            None
+        }).await.unwrap_or(None);
+
+        if let Some(KeyEvent { code, modifiers, kind, .. }) = key_event {
+            if kind == crossterm::event::KeyEventKind::Press || kind == crossterm::event::KeyEventKind::Repeat {
                     last_input_time = std::time::Instant::now();
                     key_pressed = true; // force immediate screen update on keystroke
 
@@ -224,7 +232,6 @@ pub async fn run(
                         }
                     }
                 }
-            }
         } else if !search_mode && scroll_offset > 0 && last_input_time.elapsed() > Duration::from_secs(10) {
             scroll_offset = 0;
         }
@@ -570,8 +577,12 @@ pub async fn run(
             let _ = write!(buf, "\x1b[37;100m{}\x1b[K\x1b[0m", footer);
         }
 
-        let _ = stdout.write_all(buf.as_bytes());
-        let _ = stdout.flush();
+        let buf_str = buf.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut stdout = io::stdout();
+            let _ = stdout.write_all(buf_str.as_bytes());
+            let _ = stdout.flush();
+        }).await;
 
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

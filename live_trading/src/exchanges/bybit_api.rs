@@ -189,6 +189,14 @@ impl BybitClient {
         }
     }
 
+    /// Keeps the reqwest connection pool warm by pinging the server.
+    /// This eliminates the >100ms DNS/TCP/TLS handshake latency on the first order
+    /// if the bot has been idle for longer than the connection keep-alive timeout.
+    pub async fn ping_keepalive(&self) {
+        let url = format!("{}/v5/market/time", self.base_url);
+        let _ = self.http_fast.get(&url).send().await;
+    }
+
     /// Get the live USDT balance (pushed by private WS wallet event).
     /// Falls back to 0.0 if private WS has not yet delivered a balance.
     pub async fn get_live_balance(&self) -> f64 {
@@ -495,10 +503,10 @@ impl BybitClient {
             }
         };
 
-        // Await fill from private WS — timeout 500ms
-        // If it doesn't arrive in 500ms, the event was lost or the WS is disconnected.
-        // Fail fast so the other leg can be reversed quickly.
-        match tokio::time::timeout(std::time::Duration::from_millis(500), rx).await {
+        // Await fill from private WS — timeout 200ms
+        // Tokyo RTT to Bybit is ~86ms, so 200ms = ~2.3x headroom for WS events.
+        // If it doesn't arrive in 200ms, WS may be disconnected; fall back to REST.
+        match tokio::time::timeout(std::time::Duration::from_millis(200), rx).await {
             Ok(Ok(fill)) if fill.is_expired => {
                 // WS delivered an Expired/Cancelled event with 0 fill — fast fail in ~20ms.
                 // This replaces the old 500ms timeout + REST fallback path.
