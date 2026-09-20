@@ -24,3 +24,6 @@ keys.env
 .DS_Store
 Thumbs.db
 
+# Scratch and test scripts
+scratch/
+live_trading/scratch/

@@ -1,3 +1,5 @@
+use dashmap::DashMap;
+use futures_util::{SinkExt, StreamExt};
 /// Binance Futures WebSocket API client for ultra-low-latency order placement.
 ///
 /// Instead of sending orders via HTTP POST to `fapi.binance.com` (which routes
@@ -15,15 +17,12 @@
 /// IMPORTANT: Unlike Bybit's Trade WS (sign once on connect), Binance WS API
 /// requires HMAC-SHA256 signature per message. However, HMAC computation takes
 /// only ~0.1ms so the overhead is negligible.
-
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use serde::Deserialize;
-use std::sync::Arc;
+use sha2::Sha256;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use dashmap::DashMap;
-use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{oneshot, Mutex};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -80,23 +79,29 @@ type PendingRequest = oneshot::Sender<Result<serde_json::Value, String>>;
 type PendingRequestMap = Arc<DashMap<String, PendingRequest>>;
 
 /// Write half of the WebSocket connection, wrapped in a Mutex for thread-safe sends.
-type WsSink = Arc<Mutex<Option<futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>
+type WsSink = Arc<
+    Mutex<
+        Option<
+            futures_util::stream::SplitSink<
+                tokio_tungstenite::WebSocketStream<
+                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                >,
+                Message,
+            >,
+        >,
     >,
-    Message
->>>>;
+>;
 
 /// Binance WS API client handle.
 /// Clone-friendly — all internal state is behind Arc.
 #[derive(Clone)]
 pub struct BinanceTradeWs {
-    api_key:      String,
-    api_secret:   String,
-    sink:         WsSink,
-    pending:      PendingRequestMap,
-    connected:    Arc<AtomicBool>,
-    req_counter:  Arc<AtomicU64>,
+    api_key: String,
+    api_secret: String,
+    sink: WsSink,
+    pending: PendingRequestMap,
+    connected: Arc<AtomicBool>,
+    req_counter: Arc<AtomicU64>,
 }
 
 impl BinanceTradeWs {
@@ -105,10 +110,10 @@ impl BinanceTradeWs {
         BinanceTradeWs {
             api_key,
             api_secret,
-            sink:         Arc::new(Mutex::new(None)),
-            pending:      Arc::new(DashMap::new()),
-            connected:    Arc::new(AtomicBool::new(false)),
-            req_counter:  Arc::new(AtomicU64::new(1)),
+            sink: Arc::new(Mutex::new(None)),
+            pending: Arc::new(DashMap::new()),
+            connected: Arc::new(AtomicBool::new(false)),
+            req_counter: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -126,8 +131,8 @@ impl BinanceTradeWs {
     /// Sign a query string with HMAC-SHA256 (same as REST API).
     #[inline]
     fn sign(&self, payload: &str) -> String {
-        let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes())
-            .expect("HMAC key error");
+        let mut mac =
+            HmacSha256::new_from_slice(self.api_secret.as_bytes()).expect("HMAC key error");
         mac.update(payload.as_bytes());
         hex::encode(mac.finalize().into_bytes())
     }
@@ -236,10 +241,12 @@ impl BinanceTradeWs {
                             if let Some(result) = resp.result {
                                 let _ = sender.send(Ok(result));
                             } else {
-                                let _ = sender.send(Err("Empty result in 200 response".to_string()));
+                                let _ =
+                                    sender.send(Err("Empty result in 200 response".to_string()));
                             }
                         } else {
-                            let err_msg = resp.error
+                            let err_msg = resp
+                                .error
                                 .map(|e| format!("Binance WS API error {}: {}", e.code, e.msg))
                                 .unwrap_or_else(|| format!("WS API status {}", resp.status));
                             let _ = sender.send(Err(err_msg));
@@ -249,7 +256,11 @@ impl BinanceTradeWs {
                 }
                 Err(e) => {
                     // Not a WS API response (could be a stream event) — log only at debug level
-                    eprintln!("[BinanceTradeWS] Non-API message (parse err: {}): {}", e, &text[..text.len().min(200)]);
+                    eprintln!(
+                        "[BinanceTradeWS] Non-API message (parse err: {}): {}",
+                        e,
+                        &text[..text.len().min(200)]
+                    );
                 }
             }
         }
@@ -278,12 +289,12 @@ impl BinanceTradeWs {
     /// `reduce_only` should be `true` for close orders.
     pub async fn place_order(
         &self,
-        symbol:          &str,
-        side:            &str,
-        quantity:        f64,
+        symbol: &str,
+        side: &str,
+        quantity: f64,
         client_order_id: &str,
-        reduce_only:     bool,
-        price:           Option<f64>,
+        reduce_only: bool,
+        price: Option<f64>,
     ) -> Result<WsOrderResult, String> {
         if !self.is_connected() {
             return Err("BinanceTradeWS not connected".to_string());
@@ -388,9 +399,10 @@ impl BinanceTradeWs {
                         );
                         Ok(order)
                     }
-                    Err(e) => {
-                        Err(format!("Failed to parse WS order result: {} | raw: {}", e, result_json))
-                    }
+                    Err(e) => Err(format!(
+                        "Failed to parse WS order result: {} | raw: {}",
+                        e, result_json
+                    )),
                 }
             }
             Ok(Ok(Err(api_err))) => Err(api_err),
@@ -400,7 +412,11 @@ impl BinanceTradeWs {
             }
             Err(_) => {
                 self.pending.remove(&req_id);
-                Err(format!("WS order timeout ({}ms) for reqId={}", timeout.as_millis(), req_id))
+                Err(format!(
+                    "WS order timeout ({}ms) for reqId={}",
+                    timeout.as_millis(),
+                    req_id
+                ))
             }
         }
     }

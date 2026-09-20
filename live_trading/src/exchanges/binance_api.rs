@@ -1,13 +1,13 @@
+use super::binance_trade_ws::BinanceTradeWs;
+use super::fill_channel::{FillEvent, LiveBalance, PendingFillMap};
+use chrono::Utc;
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use serde::Deserialize;
-use std::time::{SystemTime, UNIX_EPOCH};
+use sha2::Sha256;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
-use super::fill_channel::{FillEvent, LiveBalance, PendingFillMap};
-use super::binance_trade_ws::BinanceTradeWs;
-use chrono::Utc;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -16,17 +16,17 @@ type HmacSha256 = Hmac<Sha256>;
 /// Fill confirmations are received via private WS (PendingFillMap) instead of REST polling.
 #[derive(Clone)]
 pub struct BinanceClient {
-    api_key:       String,
-    api_secret:    String,
+    api_key: String,
+    api_secret: String,
     /// Client with shorter timeout for latency-critical order placement.
-    http_fast:     reqwest::Client,
+    http_fast: reqwest::Client,
     /// Client with standard timeout for non-critical queries (balances, positions).
-    http_slow:     reqwest::Client,
-    base_url:      String,
+    http_slow: reqwest::Client,
+    base_url: String,
     /// Registry of orders waiting for a WS fill event.
     pending_fills: PendingFillMap,
     /// Live USDT balance updated in real-time by the private WS ACCOUNT_UPDATE.
-    live_balance:  LiveBalance,
+    live_balance: LiveBalance,
     /// Tracks orders placed in the last 10s to avoid Binance 300/10s rate limit throttle.
     /// When count approaches limit, we add a brief backoff to prevent the ~180ms queue delay.
     order_count_10s: Arc<AtomicU32>,
@@ -133,10 +133,10 @@ impl BinanceClient {
     /// Uses HTTP/2 with a fast 3s timeout for orders and a slower 8s timeout for account queries.
     /// Uses fapi2.binance.com — the fastest direct-cluster endpoint from Tokyo (15ms vs 29ms on fapi.binance.com).
     pub fn new(
-        api_key:       String,
-        api_secret:    String,
+        api_key: String,
+        api_secret: String,
         pending_fills: PendingFillMap,
-        live_balance:  LiveBalance,
+        live_balance: LiveBalance,
     ) -> Self {
         // Fast client for latency-critical order placement:
         // - pool_max_idle_per_host keeps connections warm
@@ -170,7 +170,10 @@ impl BinanceClient {
                     interval.tick().await;
                     let prev = counter.swap(0, Ordering::Relaxed);
                     if prev > 0 {
-                        eprintln!("[BinanceAPI] Rate limit reset: order_count_10s was {}/300", prev);
+                        eprintln!(
+                            "[BinanceAPI] Rate limit reset: order_count_10s was {}/300",
+                            prev
+                        );
                     }
                 }
             });
@@ -218,8 +221,8 @@ impl BinanceClient {
     /// Sign a query string with HMAC-SHA256.
     #[inline]
     fn sign(&self, query: &str) -> String {
-        let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes())
-            .expect("HMAC key error");
+        let mut mac =
+            HmacSha256::new_from_slice(self.api_secret.as_bytes()).expect("HMAC key error");
         mac.update(query.as_bytes());
         hex::encode(mac.finalize().into_bytes())
     }
@@ -234,7 +237,8 @@ impl BinanceClient {
             self.base_url, query, signature
         );
 
-        let resp = self.http_slow
+        let resp = self
+            .http_slow
             .get(&url)
             .header("X-MBX-APIKEY", &self.api_key)
             .send()
@@ -242,7 +246,10 @@ impl BinanceClient {
             .map_err(|e| format!("Binance balance request failed: {}", e))?;
 
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read response: {}", e))?;
 
         if !status.is_success() {
             return Err(format!("Binance balance API error ({}): {}", status, text));
@@ -253,7 +260,9 @@ impl BinanceClient {
 
         for bal in &balances {
             if bal.asset == "USDT" {
-                return bal.availableBalance.parse::<f64>()
+                return bal
+                    .availableBalance
+                    .parse::<f64>()
                     .map_err(|e| format!("Failed to parse USDT balance: {}", e));
             }
         }
@@ -288,7 +297,11 @@ impl BinanceClient {
 
         // Try WebSocket first for ultra-low latency
         if self.trade_ws.is_connected() {
-            match self.trade_ws.place_order(symbol, side, quantity, client_order_id, reduce_only, price).await {
+            match self
+                .trade_ws
+                .place_order(symbol, side, quantity, client_order_id, reduce_only, price)
+                .await
+            {
                 Ok(ws_res) => {
                     return Ok(BinanceOrderResponse {
                         orderId: ws_res.orderId.unwrap_or(0),
@@ -303,7 +316,10 @@ impl BinanceClient {
                     });
                 }
                 Err(e) => {
-                    eprintln!("[BinanceAPI] ⚠️ WS place_order failed: {}. Falling back to REST...", e);
+                    eprintln!(
+                        "[BinanceAPI] ⚠️ WS place_order failed: {}. Falling back to REST...",
+                        e
+                    );
                 }
             }
         }
@@ -332,12 +348,30 @@ impl BinanceClient {
         );
 
         if let Some(p) = price {
-            eprintln!("[{}][BinanceAPI] Placing {} {} {} @ LIMIT IOC {:.6} (clientId={}, count={}/300)", Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"), side, quantity, symbol, p, client_order_id, current_count);
+            eprintln!(
+                "[{}][BinanceAPI] Placing {} {} {} @ LIMIT IOC {:.6} (clientId={}, count={}/300)",
+                Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                side,
+                quantity,
+                symbol,
+                p,
+                client_order_id,
+                current_count
+            );
         } else {
-            eprintln!("[{}][BinanceAPI] Placing {} {} {} @ MARKET (clientId={}, count={}/300)", Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"), side, quantity, symbol, client_order_id, current_count);
+            eprintln!(
+                "[{}][BinanceAPI] Placing {} {} {} @ MARKET (clientId={}, count={}/300)",
+                Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                side,
+                quantity,
+                symbol,
+                client_order_id,
+                current_count
+            );
         }
 
-        let resp = self.http_fast
+        let resp = self
+            .http_fast
             .post(&url)
             .header("X-MBX-APIKEY", &self.api_key)
             .send()
@@ -346,9 +380,22 @@ impl BinanceClient {
 
         let status = resp.status();
         // Log rate limit headers to track Binance-side throttling in real-time
-        let used_weight   = resp.headers().get("x-mbx-used-weight-1m").and_then(|v| v.to_str().ok()).unwrap_or("?").to_string();
-        let order_count   = resp.headers().get("x-mbx-order-count-10s").and_then(|v| v.to_str().ok()).unwrap_or("?").to_string();
-        let text = resp.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
+        let used_weight = resp
+            .headers()
+            .get("x-mbx-used-weight-1m")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("?")
+            .to_string();
+        let order_count = resp
+            .headers()
+            .get("x-mbx-order-count-10s")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("?")
+            .to_string();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read response: {}", e))?;
 
         eprintln!(
             "[BinanceAPI] Headers: weight={}/1200 orders_10s={}/300",
@@ -365,7 +412,10 @@ impl BinanceClient {
         eprintln!(
             "[{}][BinanceAPI] Order accepted: id={} status={} filled={} avgPrice={}",
             Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-            order.orderId, order.status, order.executedQty, order.avgPrice
+            order.orderId,
+            order.status,
+            order.executedQty,
+            order.avgPrice
         );
 
         // status="NEW" means accepted but not yet matched — this is NOT a failure.
@@ -389,17 +439,15 @@ impl BinanceClient {
         order_id: u64,
     ) -> Result<Vec<BinanceTrade>, String> {
         let ts = Self::timestamp_ms();
-        let query = format!(
-            "symbol={}&orderId={}&timestamp={}",
-            symbol, order_id, ts
-        );
+        let query = format!("symbol={}&orderId={}&timestamp={}", symbol, order_id, ts);
         let signature = self.sign(&query);
         let url = format!(
             "{}/fapi/v1/userTrades?{}&signature={}",
             self.base_url, query, signature
         );
 
-        let resp = self.http_fast
+        let resp = self
+            .http_fast
             .get(&url)
             .header("X-MBX-APIKEY", &self.api_key)
             .send()
@@ -407,7 +455,10 @@ impl BinanceClient {
             .map_err(|e| format!("Binance trades request failed: {}", e))?;
 
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read response: {}", e))?;
 
         if !status.is_success() {
             return Err(format!("Binance trades API error ({}): {}", status, text));
@@ -430,40 +481,47 @@ impl BinanceClient {
     /// `reduce_only`: pass `true` for close orders to prevent opening new positions.
     pub async fn execute_order_with_fill(
         &self,
-        symbol:      &str,
-        side:        &str,
-        quantity:    f64,
+        symbol: &str,
+        side: &str,
+        quantity: f64,
         reduce_only: bool,
-        price:       Option<f64>,
+        price: Option<f64>,
     ) -> Result<OrderFill, String> {
         // Generate a unique client order ID and register the fill channel FIRST
         // so it's ready before the WS fill event can arrive.
-        let client_order_id = format!("arb{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros());
+        let client_order_id = format!(
+            "arb{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros()
+        );
 
         let (tx, rx) = oneshot::channel::<FillEvent>();
         self.pending_fills.insert(client_order_id.clone(), tx);
 
         // Try WebSocket API first (bypasses Cloudflare CDN, ~10-15ms vs ~210ms REST)
         let order = if self.trade_ws.is_connected() {
-            match self.trade_ws.place_order(symbol, side, quantity, &client_order_id, reduce_only, price).await {
+            match self
+                .trade_ws
+                .place_order(symbol, side, quantity, &client_order_id, reduce_only, price)
+                .await
+            {
                 Ok(ws_order) => {
                     // Convert WsOrderResult to BinanceOrderResponse for uniform handling
                     let executed_qty = ws_order.executedQty.clone();
                     let avg_price = ws_order.avgPrice.clone();
                     let cum_quote = ws_order.cumQuote.clone();
                     BinanceOrderResponse {
-                        orderId:     ws_order.orderId.unwrap_or(0),
-                        symbol:      ws_order.symbol,
-                        status:      ws_order.status,
-                        side:        side.to_string(),
-                        origQty:     format!("{:.8}", quantity),
+                        orderId: ws_order.orderId.unwrap_or(0),
+                        symbol: ws_order.symbol,
+                        status: ws_order.status,
+                        side: side.to_string(),
+                        origQty: format!("{:.8}", quantity),
                         executedQty: executed_qty,
-                        avgPrice:    avg_price,
-                        cumQuote:    cum_quote,
-                        updateTime:  ws_order.updateTime,
+                        avgPrice: avg_price,
+                        cumQuote: cum_quote,
+                        updateTime: ws_order.updateTime,
                     }
                 }
                 Err(ws_err) => {
@@ -472,7 +530,10 @@ impl BinanceClient {
                         "[BinanceAPI] WS order failed ({}), falling back to REST",
                         ws_err
                     );
-                    match self.place_order(symbol, side, quantity, &client_order_id, reduce_only, price).await {
+                    match self
+                        .place_order(symbol, side, quantity, &client_order_id, reduce_only, price)
+                        .await
+                    {
                         Ok(o) => o,
                         Err(e) => {
                             self.pending_fills.remove(&client_order_id);
@@ -484,7 +545,10 @@ impl BinanceClient {
         } else {
             // WS not connected — use REST directly
             eprintln!("[BinanceAPI] Trade WS not connected, using REST");
-            match self.place_order(symbol, side, quantity, &client_order_id, reduce_only, price).await {
+            match self
+                .place_order(symbol, side, quantity, &client_order_id, reduce_only, price)
+                .await
+            {
                 Ok(o) => o,
                 Err(e) => {
                     self.pending_fills.remove(&client_order_id);
@@ -497,7 +561,10 @@ impl BinanceClient {
         let executed_qty = order.executedQty.parse::<f64>().unwrap_or(0.0);
         if (order.status == "EXPIRED" || order.status == "CANCELED") && executed_qty == 0.0 {
             self.pending_fills.remove(&client_order_id);
-            return Err(format!("Binance IOC order {} expired/canceled with 0 fill (slippage limit exceeded)", order.orderId));
+            return Err(format!(
+                "Binance IOC order {} expired/canceled with 0 fill (slippage limit exceeded)",
+                order.orderId
+            ));
         }
 
         // Await fill from private WS.
@@ -524,16 +591,16 @@ impl BinanceClient {
             Ok(Ok(fill)) => {
                 // Fill arrived via WS push — fast path
                 Ok(OrderFill {
-                    order_id:         order.orderId,
-                    symbol:           order.symbol,
-                    side:             order.side,
-                    avg_price:        fill.avg_price,
-                    filled_qty:       fill.filled_qty,
-                    quote_qty:        fill.quote_qty,
-                    commission:       fill.commission,
+                    order_id: order.orderId,
+                    symbol: order.symbol,
+                    side: order.side,
+                    avg_price: fill.avg_price,
+                    filled_qty: fill.filled_qty,
+                    quote_qty: fill.quote_qty,
+                    commission: fill.commission,
                     commission_asset: "USDT".to_string(),
-                    realized_pnl:     0.0,
-                    timestamp:        fill.timestamp,
+                    realized_pnl: 0.0,
+                    timestamp: fill.timestamp,
                 })
             }
             _ => {
@@ -551,11 +618,18 @@ impl BinanceClient {
 
                 // Query order detail from REST to get real fill data
                 let ts = Self::timestamp_ms();
-                let query = format!("symbol={}&orderId={}&timestamp={}", symbol, order.orderId, ts);
+                let query = format!(
+                    "symbol={}&orderId={}&timestamp={}",
+                    symbol, order.orderId, ts
+                );
                 let signature = self.sign(&query);
-                let detail_url = format!("{}/fapi/v1/order?{}&signature={}", self.base_url, query, signature);
+                let detail_url = format!(
+                    "{}/fapi/v1/order?{}&signature={}",
+                    self.base_url, query, signature
+                );
 
-                match self.http_slow
+                match self
+                    .http_slow
                     .get(&detail_url)
                     .header("X-MBX-APIKEY", &self.api_key)
                     .send()
@@ -565,9 +639,9 @@ impl BinanceClient {
                         let detail_text = detail_resp.text().await.unwrap_or_default();
                         match serde_json::from_str::<BinanceOrderResponse>(&detail_text) {
                             Ok(detail) => {
-                                let avg_price  = detail.avgPrice.parse::<f64>().unwrap_or(0.0);
+                                let avg_price = detail.avgPrice.parse::<f64>().unwrap_or(0.0);
                                 let filled_qty = detail.executedQty.parse::<f64>().unwrap_or(0.0);
-                                let quote_qty  = detail.cumQuote.parse::<f64>().unwrap_or(0.0);
+                                let quote_qty = detail.cumQuote.parse::<f64>().unwrap_or(0.0);
                                 let commission = quote_qty * 0.0005;
                                 eprintln!(
                                     "[BinanceAPI] REST detail: id={} status={} avgPrice={} qty={} fee={}",
@@ -580,16 +654,16 @@ impl BinanceClient {
                                     ));
                                 }
                                 Ok(OrderFill {
-                                    order_id:         order.orderId,
-                                    symbol:           order.symbol,
-                                    side:             order.side,
+                                    order_id: order.orderId,
+                                    symbol: order.symbol,
+                                    side: order.side,
                                     avg_price,
                                     filled_qty,
                                     quote_qty,
                                     commission,
                                     commission_asset: "USDT".to_string(),
-                                    realized_pnl:     0.0,
-                                    timestamp:        order.updateTime,
+                                    realized_pnl: 0.0,
+                                    timestamp: order.updateTime,
                                 })
                             }
                             Err(e) => {
@@ -614,23 +688,20 @@ impl BinanceClient {
         }
     }
 
-
     /// Set leverage for a specific symbol on Binance Futures.
     /// Must be called BEFORE placing an order to ensure the correct leverage is active.
     /// Leverage is an integer between 1 and 125 (symbol-dependent maximum).
     pub async fn set_leverage(&self, symbol: &str, leverage: u32) -> Result<(), String> {
         let ts = Self::timestamp_ms();
-        let query = format!(
-            "symbol={}&leverage={}&timestamp={}",
-            symbol, leverage, ts
-        );
+        let query = format!("symbol={}&leverage={}&timestamp={}", symbol, leverage, ts);
         let signature = self.sign(&query);
         let url = format!(
             "{}/fapi/v1/leverage?{}&signature={}",
             self.base_url, query, signature
         );
 
-        let resp = self.http_fast
+        let resp = self
+            .http_fast
             .post(&url)
             .header("X-MBX-APIKEY", &self.api_key)
             .send()
@@ -638,11 +709,17 @@ impl BinanceClient {
             .map_err(|e| format!("Binance set leverage request failed: {}", e))?;
 
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read response: {}", e))?;
 
         if !status.is_success() {
             // Binance returns 200 even for "leverage not changed" — a non-200 is a real error
-            return Err(format!("Binance set leverage API error ({}): {}", status, text));
+            return Err(format!(
+                "Binance set leverage API error ({}): {}",
+                status, text
+            ));
         }
 
         eprintln!("[BinanceAPI] Set leverage for {} to {}x", symbol, leverage);
@@ -660,7 +737,8 @@ impl BinanceClient {
             self.base_url, query, signature
         );
 
-        let resp = self.http_slow
+        let resp = self
+            .http_slow
             .get(&url)
             .header("X-MBX-APIKEY", &self.api_key)
             .send()
@@ -668,18 +746,25 @@ impl BinanceClient {
             .map_err(|e| format!("Binance positions request failed: {}", e))?;
 
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read response: {}", e))?;
 
         if !status.is_success() {
-            return Err(format!("Binance positions API error ({}): {}", status, text));
+            return Err(format!(
+                "Binance positions API error ({}): {}",
+                status, text
+            ));
         }
 
         let positions: Vec<BinancePosition> = serde_json::from_str(&text)
             .map_err(|e| format!("Failed to parse positions: {} | body: {}", e, text))?;
 
         // Filter to only non-zero positions
-        Ok(positions.into_iter().filter(|p| {
-            p.positionAmt.parse::<f64>().unwrap_or(0.0).abs() > 0.0
-        }).collect())
+        Ok(positions
+            .into_iter()
+            .filter(|p| p.positionAmt.parse::<f64>().unwrap_or(0.0).abs() > 0.0)
+            .collect())
     }
 }

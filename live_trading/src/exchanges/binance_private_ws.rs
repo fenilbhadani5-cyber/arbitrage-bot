@@ -13,7 +13,6 @@
 ///   3. Keep alive: PUT /fapi/v1/listenKey every 25 min
 ///   4. Parse ORDER_TRADE_UPDATE → resolve pending fill channel
 ///   5. Parse ACCOUNT_UPDATE     → update live balance
-
 use super::fill_channel::{FillEvent, LiveBalance, PendingFillMap};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -37,23 +36,23 @@ struct OrderUpdate {
     #[serde(default, rename = "S")]
     side: String,
     #[serde(default, rename = "X")]
-    status: String,        // FILLED, PARTIALLY_FILLED, etc.
+    status: String, // FILLED, PARTIALLY_FILLED, etc.
     #[serde(default, rename = "i")]
     order_id: u64,
     #[serde(default, rename = "c")]
     client_order_id: String, // newClientOrderId we sent — our pre-registered fill key
     #[serde(default, rename = "z")]
-    cum_filled_qty: String,     // cumulative filled quantity
+    cum_filled_qty: String, // cumulative filled quantity
     #[serde(default, rename = "ap")]
-    avg_price: String,          // average fill price
+    avg_price: String, // average fill price
     #[serde(default, rename = "T")]
     trade_time: u64,
     #[serde(default, rename = "n")]
-    commission: String,         // commission amount
+    commission: String, // commission amount
     #[serde(default, rename = "N")]
     commission_asset: Option<String>,
     #[serde(default, rename = "cp")]
-    cum_quote: Option<String>,  // cumulative quote (notional)
+    cum_quote: Option<String>, // cumulative quote (notional)
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,8 +115,8 @@ async fn create_listen_key(api_key: &str) -> Result<String, String> {
         #[serde(rename = "listenKey")]
         listen_key: String,
     }
-    let r: Resp = serde_json::from_str(&text)
-        .map_err(|e| format!("Failed to parse listenKey: {}", e))?;
+    let r: Resp =
+        serde_json::from_str(&text).map_err(|e| format!("Failed to parse listenKey: {}", e))?;
 
     Ok(r.listen_key)
 }
@@ -139,7 +138,10 @@ async fn keep_alive_listen_key(api_key: &str, listen_key: &str) {
             eprintln!("[BinancePrivateWS] listenKey refreshed");
         }
         Ok(r) => {
-            eprintln!("[BinancePrivateWS] listenKey refresh failed: {}", r.status());
+            eprintln!(
+                "[BinancePrivateWS] listenKey refresh failed: {}",
+                r.status()
+            );
         }
         Err(e) => {
             eprintln!("[BinancePrivateWS] listenKey refresh error: {}", e);
@@ -152,11 +154,7 @@ async fn keep_alive_listen_key(api_key: &str, listen_key: &str) {
 /// Run the Binance private WebSocket listener.
 /// Spawns a background task to keep the listenKey alive every 25 minutes.
 /// On disconnect, caller should re-invoke (wrapped in a reconnect loop in main.rs).
-pub async fn run(
-    api_key:       String,
-    pending_fills: PendingFillMap,
-    live_balance:  LiveBalance,
-) {
+pub async fn run(api_key: String, pending_fills: PendingFillMap, live_balance: LiveBalance) {
     // Obtain a listenKey
     let listen_key = match create_listen_key(&api_key).await {
         Ok(k) => k,
@@ -227,15 +225,19 @@ pub async fn run(
 
                         // Wait for terminal state to get final cumulative filled quantity.
                         // IOC orders will be FILLED or EXPIRED (if partially filled).
-                        if o.status != "FILLED" && o.status != "EXPIRED" && o.status != "CANCELED" && o.status != "REJECTED" {
+                        if o.status != "FILLED"
+                            && o.status != "EXPIRED"
+                            && o.status != "CANCELED"
+                            && o.status != "REJECTED"
+                        {
                             continue;
                         }
 
                         let order_id_str = o.order_id.to_string();
-                        let avg_price   = o.avg_price.parse::<f64>().unwrap_or(0.0);
-                        let filled_qty  = o.cum_filled_qty.parse::<f64>().unwrap_or(0.0);
-                        let commission  = o.commission.parse::<f64>().unwrap_or(0.0).abs();
-                        let quote_qty   = avg_price * filled_qty;
+                        let avg_price = o.avg_price.parse::<f64>().unwrap_or(0.0);
+                        let filled_qty = o.cum_filled_qty.parse::<f64>().unwrap_or(0.0);
+                        let commission = o.commission.parse::<f64>().unwrap_or(0.0).abs();
+                        let quote_qty = avg_price * filled_qty;
 
                         eprintln!(
                             "[BinancePrivateWS] Fill: order={} clientId={} status={} qty={} avgPrice={} fee={}",
@@ -258,7 +260,9 @@ pub async fn run(
                         // Deliver fill to waiting execute_order_with_fill().
                         // Set is_expired=true for EXPIRED/CANCELED with 0 fill so the caller
                         // can fast-fail in ~20ms instead of hitting the 500ms timeout.
-                        let is_expired = (o.status == "EXPIRED" || o.status == "CANCELED" || o.status == "REJECTED")
+                        let is_expired = (o.status == "EXPIRED"
+                            || o.status == "CANCELED"
+                            || o.status == "REJECTED")
                             && filled_qty == 0.0;
 
                         if is_expired {
@@ -267,18 +271,21 @@ pub async fn run(
 
                         if let Some((_, sender)) = pending_fills.remove(&matched_key) {
                             let _ = sender.send(FillEvent {
-                                order_id:   order_id_str,
+                                order_id: order_id_str,
                                 avg_price,
                                 filled_qty,
                                 quote_qty,
                                 commission,
-                                timestamp:  o.trade_time,
+                                timestamp: o.trade_time,
                                 is_expired,
                             });
                         }
                     }
                     Err(e) => {
-                        eprintln!("[BinancePrivateWS] Failed to parse ORDER_TRADE_UPDATE: {} | raw: {}", e, text);
+                        eprintln!(
+                            "[BinancePrivateWS] Failed to parse ORDER_TRADE_UPDATE: {} | raw: {}",
+                            e, text
+                        );
                     }
                 }
             }
@@ -287,7 +294,9 @@ pub async fn run(
                 if let Ok(ev) = serde_json::from_str::<AccountUpdateEvent>(&text) {
                     for bal in &ev.data.balances {
                         if bal.asset == "USDT" {
-                            let raw = if !bal.cross_wallet_balance.is_empty() && bal.cross_wallet_balance != "0" {
+                            let raw = if !bal.cross_wallet_balance.is_empty()
+                                && bal.cross_wallet_balance != "0"
+                            {
                                 &bal.cross_wallet_balance
                             } else if !bal.wallet_balance.is_empty() {
                                 &bal.wallet_balance

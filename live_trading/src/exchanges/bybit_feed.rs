@@ -1,12 +1,11 @@
 use crate::price_store::{normalize_symbol, FundingStore, PriceStore, SharedStatus};
+use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use url::Url;
-use chrono::Utc;
-
 
 // REST API parsing — instruments
 #[derive(Deserialize, Debug)]
@@ -31,8 +30,6 @@ struct Instrument {
     #[serde(default)]
     fundingInterval: Option<u64>, // minutes
 }
-
-
 
 // WebSocket parsing
 #[derive(Deserialize, Debug)]
@@ -73,7 +70,6 @@ fn clear_bybit_prices(store: &PriceStore) {
     }
 }
 
-
 /// Connects to Bybit USDT-M Perpetual Futures WebSocket (read-only, no auth).
 pub async fn run(store: PriceStore, status: SharedStatus, funding: FundingStore) {
     // Wait until Bybit is enabled
@@ -111,12 +107,14 @@ pub async fn run(store: PriceStore, status: SharedStatus, funding: FundingStore)
     // Filter: ONLY actively trading LinearPerpetual crypto contracts (not stocks, commodities, or ETFs)
     // NOTE: Bybit lists synthetic US stocks like ONUSDT (On Semiconductor), AAPLUSDT, etc.
     // Filtering out non-crypto prevents ticker collisions against actual crypto tokens.
-    let symbols: Vec<String> = res.result.list
+    let symbols: Vec<String> = res
+        .result
+        .list
         .iter()
         .filter(|i| {
             let s = i.status == "Trading";
             let ct = i.contractType.as_deref() == Some("LinearPerpetual")
-                  || i.contractType.as_deref() == Some("PERPETUAL");
+                || i.contractType.as_deref() == Some("PERPETUAL");
             let is_non_crypto = match i.symbolType.as_deref() {
                 Some("stock") | Some("commodity") | Some("ETF") => true,
                 _ => false,
@@ -128,13 +126,18 @@ pub async fn run(store: PriceStore, status: SharedStatus, funding: FundingStore)
 
     // Populate funding intervals
     for inst in &res.result.list {
-        if !symbols.contains(&inst.symbol) { continue; }
+        if !symbols.contains(&inst.symbol) {
+            continue;
+        }
         let key = normalize_symbol(&inst.symbol);
-        let hours = inst.fundingInterval
+        let hours = inst
+            .fundingInterval
             .map(|m| (m / 60).max(1) as u32)
             .unwrap_or(8);
         let mut entry = funding.entry(key).or_insert(hours);
-        if hours < *entry { *entry = hours; }
+        if hours < *entry {
+            *entry = hours;
+        }
     }
     eprintln!("[Bybit] Found {} USDT perpetual symbols", symbols.len());
 
@@ -166,26 +169,38 @@ pub async fn run(store: PriceStore, status: SharedStatus, funding: FundingStore)
                 let mut entry = store.entry(key).or_default();
                 if let Some(ref bp) = t.bid1Price {
                     if let Ok(bid) = bp.parse::<f64>() {
-                        if bid > 0.0 { entry.bybit_book.best_bid = Some(bid); }
+                        if bid > 0.0 {
+                            entry.bybit_book.best_bid = Some(bid);
+                        }
                     }
                 }
                 if let Some(ref bq) = t.bid1Size {
-                    if let Ok(qty) = bq.parse::<f64>() { entry.bybit_book.best_bid_qty = Some(qty); }
+                    if let Ok(qty) = bq.parse::<f64>() {
+                        entry.bybit_book.best_bid_qty = Some(qty);
+                    }
                 }
                 if let Some(ref ap) = t.ask1Price {
                     if let Ok(ask) = ap.parse::<f64>() {
-                        if ask > 0.0 { entry.bybit_book.best_ask = Some(ask); }
+                        if ask > 0.0 {
+                            entry.bybit_book.best_ask = Some(ask);
+                        }
                     }
                 }
                 if let Some(ref aq) = t.ask1Size {
-                    if let Ok(qty) = aq.parse::<f64>() { entry.bybit_book.best_ask_qty = Some(qty); }
+                    if let Ok(qty) = aq.parse::<f64>() {
+                        entry.bybit_book.best_ask_qty = Some(qty);
+                    }
                 }
                 entry.bybit_book_updated = Some(now);
                 entry.bybit_book_epoch_ms = Some(epoch_ms);
 
                 let price = match (entry.bybit_book.best_bid, entry.bybit_book.best_ask) {
                     (Some(b), Some(a)) if b > 0.0 && a > 0.0 => (b + a) / 2.0,
-                    _ => t.lastPrice.as_deref().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0),
+                    _ => t
+                        .lastPrice
+                        .as_deref()
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0),
                 };
                 if price > 0.0 {
                     entry.bybit = Some(price);
@@ -193,7 +208,10 @@ pub async fn run(store: PriceStore, status: SharedStatus, funding: FundingStore)
                     count += 1;
                 }
             }
-            eprintln!("[Bybit] Loaded initial prices for {} symbols via REST snapshot", count);
+            eprintln!(
+                "[Bybit] Loaded initial prices for {} symbols via REST snapshot",
+                count
+            );
         }
     }
 
@@ -228,12 +246,19 @@ pub async fn run(store: PriceStore, status: SharedStatus, funding: FundingStore)
                 "op": "subscribe",
                 "args": args
             });
-            if sub_tx.send(Message::Text(sub_msg.to_string())).await.is_err() {
+            if sub_tx
+                .send(Message::Text(sub_msg.to_string()))
+                .await
+                .is_err()
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        eprintln!("[Bybit] Subscribed to {} perpetual symbols (tickers via WS-only)", sub_symbols.len());
+        eprintln!(
+            "[Bybit] Subscribed to {} perpetual symbols (tickers via WS-only)",
+            sub_symbols.len()
+        );
     });
 
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(20));

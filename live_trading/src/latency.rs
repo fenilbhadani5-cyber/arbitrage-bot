@@ -11,7 +11,6 @@
 ///   order_send_ms   → tokio::join! fired (both legs sent simultaneously)
 ///   exchange_ack_ms → REST response received from both exchanges
 ///   ws_fill_ms      → WS fill event received (or REST fallback timeout)
-
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +19,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TradeLatency {
     // ── Stage timestamps (epoch ms UTC) ──
-
     /// When the book update that triggered this opportunity was written to the store.
     /// Set from price_store::CoinPrices.{binance,bybit}_book_update_epoch_ms.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -47,7 +45,6 @@ pub struct TradeLatency {
     pub ws_fill_ms: Option<i64>,
 
     // ── Derived latency metrics (milliseconds) ──
-
     /// detection_to_send: Time from opportunity detection to order fire.
     /// Measures: processing overhead, lock contention, pre-flight checks.
     /// Target: < 5ms. If > 20ms → processing bottleneck.
@@ -79,7 +76,6 @@ pub struct TradeLatency {
     pub total_pipeline_ms: Option<i64>,
 
     // ── Per-leg round-trip latencies (milliseconds) ──
-
     /// Round-trip time (in ms) for the buy leg order send -> fill/error response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buy_leg_rtt_ms: Option<i64>,
@@ -94,7 +90,6 @@ pub struct TradeLatency {
 
     // ── Quote snapshots at each stage ──
     // Used to determine if market moved or if we had stale data.
-
     /// Best ask on the buy exchange at opportunity detection time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detected_buy_ask: Option<f64>,
@@ -118,7 +113,6 @@ pub struct TradeLatency {
     // fill prices come from the fill itself (buy_fill_price, sell_fill_price in TradeRecord)
 
     // ── Latency diagnosis ──
-
     /// Human-readable diagnosis of the latency profile.
     /// e.g. "OK", "STALE_BOOK", "SLOW_REST", "SLOW_WS_FILL", "PROCESSING_DELAY", "SLOW_BUY_LEG", "SLOW_SELL_LEG"
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -199,7 +193,9 @@ impl TradeLatency {
             // If WS fill didn't happen (e.g. leg failure), compute total pipeline up to ACK
             if let (Some(book), Some(ack)) = (self.book_update_ms, self.exchange_ack_ms) {
                 self.total_pipeline_ms = Some(ack - book);
-            } else if let (Some(det), Some(ack)) = (self.opportunity_detected_ms, self.exchange_ack_ms) {
+            } else if let (Some(det), Some(ack)) =
+                (self.opportunity_detected_ms, self.exchange_ack_ms)
+            {
                 self.total_pipeline_ms = Some(ack - det);
             }
         }
@@ -316,22 +312,57 @@ impl TradeLatency {
         let sell_status = if sell_ok { "FILLED" } else { "FAILED" };
 
         eprintln!("\n{}", "═".repeat(70));
-        eprintln!("[{}][LiveTrading] 🚨 ONE-LEG FAILURE LATENCY AUDIT: {}", ts, coin);
+        eprintln!(
+            "[{}][LiveTrading] 🚨 ONE-LEG FAILURE LATENCY AUDIT: {}",
+            ts, coin
+        );
         eprintln!("{}", "═".repeat(70));
         eprintln!("  Failure Reason: {}", error_msg);
         eprintln!("  Round-Trip Timings:");
-        eprintln!("    • Combined Send→ACK RTT: {}ms", self.send_to_ack_ms.unwrap_or(buy_rtt_ms.max(sell_rtt_ms)));
-        eprintln!("    • Buy Leg  ({:<7}):   {:>4}ms [{}]", buy_exchange.to_string(), buy_rtt_ms, buy_status);
-        eprintln!("    • Sell Leg ({:<7}):  {:>4}ms [{}]", sell_exchange.to_string(), sell_rtt_ms, sell_status);
+        eprintln!(
+            "    • Combined Send→ACK RTT: {}ms",
+            self.send_to_ack_ms.unwrap_or(buy_rtt_ms.max(sell_rtt_ms))
+        );
+        eprintln!(
+            "    • Buy Leg  ({:<7}):   {:>4}ms [{}]",
+            buy_exchange.to_string(),
+            buy_rtt_ms,
+            buy_status
+        );
+        eprintln!(
+            "    • Sell Leg ({:<7}):  {:>4}ms [{}]",
+            sell_exchange.to_string(),
+            sell_rtt_ms,
+            sell_status
+        );
         if let Some((rev_ex, rev_ms, rev_ok)) = reversal_info {
-            let rev_stat = if rev_ok { "SUCCESS" } else { "FAILED - MANUAL ACTION REQUIRED" };
-            eprintln!("    • Reversal ({:<7}):  {:>4}ms [{}]", rev_ex, rev_ms, rev_stat);
+            let rev_stat = if rev_ok {
+                "SUCCESS"
+            } else {
+                "FAILED - MANUAL ACTION REQUIRED"
+            };
+            eprintln!(
+                "    • Reversal ({:<7}):  {:>4}ms [{}]",
+                rev_ex, rev_ms, rev_stat
+            );
         }
         eprintln!("  Pipeline Latency:");
-        eprintln!("    • Book Update → Send:    {:>4}ms", self.book_to_send_ms.unwrap_or(-1));
-        eprintln!("    • Detection → Send:      {:>4}ms", self.detection_to_send_ms.unwrap_or(-1));
-        eprintln!("    • Total Pipeline Time:   {:>4}ms", self.total_pipeline_ms.unwrap_or(-1));
-        eprintln!("    • Latency Diagnosis:     {}", self.latency_diagnosis.as_deref().unwrap_or("?"));
+        eprintln!(
+            "    • Book Update → Send:    {:>4}ms",
+            self.book_to_send_ms.unwrap_or(-1)
+        );
+        eprintln!(
+            "    • Detection → Send:      {:>4}ms",
+            self.detection_to_send_ms.unwrap_or(-1)
+        );
+        eprintln!(
+            "    • Total Pipeline Time:   {:>4}ms",
+            self.total_pipeline_ms.unwrap_or(-1)
+        );
+        eprintln!(
+            "    • Latency Diagnosis:     {}",
+            self.latency_diagnosis.as_deref().unwrap_or("?")
+        );
         eprintln!("  Quote & Spread Drift:");
         eprintln!(
             "    • Detected:  Ask={:.6} / Bid={:.6} (Spread: {:.3}%)",
@@ -378,4 +409,3 @@ mod tests {
         assert!(json.contains("\"reversal_rtt_ms\":80"));
     }
 }
-

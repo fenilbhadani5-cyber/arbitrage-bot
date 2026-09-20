@@ -1,11 +1,10 @@
+use serde::Deserialize;
 /// Exchange metadata cache: tick sizes, step sizes, and min notional per symbol.
 /// Fetched once at startup from Binance exchangeInfo and Bybit instruments-info.
 /// Used to properly round prices and quantities before sending orders.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use serde::Deserialize;
 
 /// Per-symbol trading rules from an exchange.
 #[derive(Debug, Clone)]
@@ -37,20 +36,26 @@ impl ExchangeInfoCache {
     /// Round a price DOWN to the nearest tick size.
     /// For BUY limit orders: we want to buy at or below this price.
     pub fn round_price_down(price: f64, tick_size: f64) -> f64 {
-        if tick_size <= 0.0 { return price; }
+        if tick_size <= 0.0 {
+            return price;
+        }
         (price / tick_size).floor() * tick_size
     }
 
     /// Round a price UP to the nearest tick size.
     /// For SELL limit orders: we want to sell at or above this price.
     pub fn round_price_up(price: f64, tick_size: f64) -> f64 {
-        if tick_size <= 0.0 { return price; }
+        if tick_size <= 0.0 {
+            return price;
+        }
         (price / tick_size).ceil() * tick_size
     }
 
     /// Round a quantity DOWN to the nearest step size.
     pub fn round_qty_down(qty: f64, step_size: f64) -> f64 {
-        if step_size <= 0.0 { return qty; }
+        if step_size <= 0.0 {
+            return qty;
+        }
         (qty / step_size).floor() * step_size
     }
 
@@ -109,7 +114,9 @@ pub async fn load_binance_info(cache: &ExchangeInfoCache) -> Result<usize, Strin
         .await
         .map_err(|e| format!("Binance exchangeInfo request failed: {}", e))?;
 
-    let text = resp.text().await
+    let text = resp
+        .text()
+        .await
         .map_err(|e| format!("Failed to read Binance exchangeInfo: {}", e))?;
 
     let info: BinanceExchangeInfo = serde_json::from_str(&text)
@@ -119,7 +126,9 @@ pub async fn load_binance_info(cache: &ExchangeInfoCache) -> Result<usize, Strin
     let mut count = 0;
 
     for sym in &info.symbols {
-        if !sym.symbol.ends_with("USDT") { continue; }
+        if !sym.symbol.ends_with("USDT") {
+            continue;
+        }
 
         let mut tick_size = 0.0;
         let mut step_size = 0.0;
@@ -152,11 +161,14 @@ pub async fn load_binance_info(cache: &ExchangeInfoCache) -> Result<usize, Strin
         }
 
         if tick_size > 0.0 && step_size > 0.0 {
-            map.insert(sym.symbol.clone(), SymbolInfo {
-                tick_size,
-                step_size,
-                min_notional,
-            });
+            map.insert(
+                sym.symbol.clone(),
+                SymbolInfo {
+                    tick_size,
+                    step_size,
+                    min_notional,
+                },
+            );
             count += 1;
         }
     }
@@ -177,15 +189,21 @@ pub async fn load_bybit_info(cache: &ExchangeInfoCache) -> Result<usize, String>
 
     loop {
         let url = if cursor.is_empty() {
-            "https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000".to_string()
+            "https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000"
+                .to_string()
         } else {
             format!("https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000&cursor={}", cursor)
         };
 
-        let resp = client.get(&url).send().await
+        let resp = client
+            .get(&url)
+            .send()
+            .await
             .map_err(|e| format!("Bybit instruments-info request failed: {}", e))?;
 
-        let text = resp.text().await
+        let text = resp
+            .text()
+            .await
             .map_err(|e| format!("Failed to read Bybit instruments-info: {}", e))?;
 
         let raw: serde_json::Value = serde_json::from_str(&text)
@@ -193,30 +211,42 @@ pub async fn load_bybit_info(cache: &ExchangeInfoCache) -> Result<usize, String>
 
         let ret_code = raw.get("retCode").and_then(|v| v.as_i64()).unwrap_or(-1);
         if ret_code != 0 {
-            return Err(format!("Bybit instruments-info API error: {}", raw.get("retMsg").and_then(|v| v.as_str()).unwrap_or("unknown")));
+            return Err(format!(
+                "Bybit instruments-info API error: {}",
+                raw.get("retMsg")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+            ));
         }
 
-        let list = raw.get("result")
+        let list = raw
+            .get("result")
             .and_then(|r| r.get("list"))
             .and_then(|l| l.as_array())
             .cloned()
             .unwrap_or_default();
 
-        if list.is_empty() { break; }
+        if list.is_empty() {
+            break;
+        }
 
         let mut map = cache.bybit.write().await;
 
         for item in &list {
             let symbol = item.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
-            if !symbol.ends_with("USDT") { continue; }
+            if !symbol.ends_with("USDT") {
+                continue;
+            }
 
-            let tick_size = item.get("priceFilter")
+            let tick_size = item
+                .get("priceFilter")
                 .and_then(|f| f.get("tickSize"))
                 .and_then(|t| t.as_str())
                 .and_then(|s| s.parse::<f64>().ok())
                 .unwrap_or(0.0);
 
-            let step_size = item.get("lotSizeFilter")
+            let step_size = item
+                .get("lotSizeFilter")
                 .and_then(|f| f.get("qtyStep"))
                 .and_then(|t| t.as_str())
                 .and_then(|s| s.parse::<f64>().ok())
@@ -225,17 +255,21 @@ pub async fn load_bybit_info(cache: &ExchangeInfoCache) -> Result<usize, String>
             let min_notional = 5.0;
 
             if tick_size > 0.0 && step_size > 0.0 {
-                map.insert(symbol.to_string(), SymbolInfo {
-                    tick_size,
-                    step_size,
-                    min_notional,
-                });
+                map.insert(
+                    symbol.to_string(),
+                    SymbolInfo {
+                        tick_size,
+                        step_size,
+                        min_notional,
+                    },
+                );
                 total += 1;
             }
         }
 
         // Check for next page cursor
-        let next_cursor = raw.get("result")
+        let next_cursor = raw
+            .get("result")
             .and_then(|r| r.get("nextPageCursor"))
             .and_then(|c| c.as_str())
             .unwrap_or("");

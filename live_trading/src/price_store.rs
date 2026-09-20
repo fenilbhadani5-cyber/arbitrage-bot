@@ -114,9 +114,7 @@ fn fresh_price(price: Option<f64>, updated: Option<Instant>) -> Option<f64> {
 
 /// Compute spread % directly from fresh prices.
 #[inline]
-pub fn compute_spread_from_fresh(
-    p1: Option<f64>, p2: Option<f64>,
-) -> Option<f64> {
+pub fn compute_spread_from_fresh(p1: Option<f64>, p2: Option<f64>) -> Option<f64> {
     match (p1, p2) {
         (Some(a), Some(b)) if a > 0.0 && b > 0.0 => {
             let min = a.min(b);

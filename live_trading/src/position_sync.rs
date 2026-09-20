@@ -5,7 +5,6 @@
 /// that were open when it was restarted.
 ///
 /// This replaces the local JSONL reconstruction which used stale cached data.
-
 use crate::exchanges::binance_api::BinanceClient;
 use crate::exchanges::bybit_api::BybitClient;
 use crate::live_trading::OpenPosition;
@@ -20,12 +19,12 @@ pub async fn sync_open_positions(
     bybit: &BybitClient,
 ) -> Vec<OpenPosition> {
     let ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
-    eprintln!("[{}][PositionSync] Fetching open positions from both exchanges...", ts);
-
-    let (bin_result, byb_result) = tokio::join!(
-        binance.get_positions(),
-        bybit.get_positions(),
+    eprintln!(
+        "[{}][PositionSync] Fetching open positions from both exchanges...",
+        ts
     );
+
+    let (bin_result, byb_result) = tokio::join!(binance.get_positions(), bybit.get_positions(),);
 
     let bin_positions = match bin_result {
         Ok(p) => {
@@ -119,7 +118,9 @@ pub async fn sync_open_positions(
                     sell_order_id: format!("sync_byb_{}", symbol),
                     entry_spread: if *bin_entry > 0.0 {
                         ((byb_entry - bin_entry) / bin_entry) * 100.0
-                    } else { 0.0 },
+                    } else {
+                        0.0
+                    },
                     open_time: Utc::now(), // unknown — use now as conservative estimate
                     entry_buy_book_bid: 0.0,
                     entry_buy_book_ask: 0.0,
@@ -157,7 +158,9 @@ pub async fn sync_open_positions(
                     sell_order_id: format!("sync_bin_{}", symbol),
                     entry_spread: if *byb_entry > 0.0 {
                         ((bin_entry - byb_entry) / byb_entry) * 100.0
-                    } else { 0.0 },
+                    } else {
+                        0.0
+                    },
                     open_time: Utc::now(),
                     entry_buy_book_bid: 0.0,
                     entry_buy_book_ask: 0.0,

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -36,6 +37,36 @@ static THROTTLE_MAP: Mutex<Option<HashMap<String, (String, Instant)>>> = Mutex::
 
 /// Minimum seconds between logging the same coin for the same reason category.
 const THROTTLE_SECS: u64 = 5;
+
+lazy_static! {
+    static ref LOG_FILE_TXT: Mutex<std::fs::File> = Mutex::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(MISSED_TRADES_LOG_PATH)
+            .unwrap_or_else(|_| {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("missed_trades.log")
+                    .expect("Failed to open missed_trades.log")
+            })
+    );
+
+    static ref LOG_FILE_JSON: Mutex<std::fs::File> = Mutex::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(MISSED_TRADES_JSONL_PATH)
+            .unwrap_or_else(|_| {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("missed_trades.jsonl")
+                    .expect("Failed to open missed_trades.jsonl")
+            })
+    );
+}
 
 /// Extract reason category (e.g. "COOLDOWN" from "COOLDOWN: remaining 15s")
 fn reason_category(reason: &str) -> &str {
@@ -83,12 +114,27 @@ pub fn log_missed_trade(record: &MissedTradeRecord) {
     let latency_str = if let Some(ref lat) = record.latency {
         let mut parts = Vec::new();
         if let Some(ack) = lat.send_to_ack_ms {
-            let buy_str = lat.buy_leg_rtt_ms.map(|ms| format!("{}ms", ms)).unwrap_or_else(|| "?".to_string());
-            let sell_str = lat.sell_leg_rtt_ms.map(|ms| format!("{}ms", ms)).unwrap_or_else(|| "?".to_string());
-            parts.push(format!("RTT: send→ack={}ms (BuyLeg: {}, SellLeg: {})", ack, buy_str, sell_str));
+            let buy_str = lat
+                .buy_leg_rtt_ms
+                .map(|ms| format!("{}ms", ms))
+                .unwrap_or_else(|| "?".to_string());
+            let sell_str = lat
+                .sell_leg_rtt_ms
+                .map(|ms| format!("{}ms", ms))
+                .unwrap_or_else(|| "?".to_string());
+            parts.push(format!(
+                "RTT: send→ack={}ms (BuyLeg: {}, SellLeg: {})",
+                ack, buy_str, sell_str
+            ));
         } else if lat.buy_leg_rtt_ms.is_some() || lat.sell_leg_rtt_ms.is_some() {
-            let buy_str = lat.buy_leg_rtt_ms.map(|ms| format!("{}ms", ms)).unwrap_or_else(|| "?".to_string());
-            let sell_str = lat.sell_leg_rtt_ms.map(|ms| format!("{}ms", ms)).unwrap_or_else(|| "?".to_string());
+            let buy_str = lat
+                .buy_leg_rtt_ms
+                .map(|ms| format!("{}ms", ms))
+                .unwrap_or_else(|| "?".to_string());
+            let sell_str = lat
+                .sell_leg_rtt_ms
+                .map(|ms| format!("{}ms", ms))
+                .unwrap_or_else(|| "?".to_string());
             parts.push(format!("RTT: (BuyLeg: {}, SellLeg: {})", buy_str, sell_str));
         }
         if let Some(rev) = lat.reversal_rtt_ms {
@@ -134,36 +180,14 @@ pub fn log_missed_trade(record: &MissedTradeRecord) {
     );
 
     // Open human-readable log (with local fallback if absolute path fails)
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(MISSED_TRADES_LOG_PATH)
-        .or_else(|_| {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("missed_trades.log")
-        });
-
-    if let Ok(mut f) = log_file {
-        let _ = f.write_all(text_line.as_bytes());
+    if let Ok(mut file) = LOG_FILE_TXT.lock() {
+        let _ = file.write_all(text_line.as_bytes());
     }
 
     // 2. Machine-readable JSONL format
     if let Ok(json) = serde_json::to_string(record) {
-        let json_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(MISSED_TRADES_JSONL_PATH)
-            .or_else(|_| {
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("missed_trades.jsonl")
-            });
-
-        if let Ok(mut f) = json_file {
-            let _ = writeln!(f, "{}", json);
+        if let Ok(mut file) = LOG_FILE_JSON.lock() {
+            let _ = writeln!(file, "{}", json);
         }
     }
 }
@@ -175,9 +199,18 @@ mod tests {
     #[test]
     fn test_reason_category() {
         assert_eq!(reason_category("COOLDOWN: 15s remaining"), "COOLDOWN");
-        assert_eq!(reason_category("MAX_POSITIONS_REACHED (1/1 active)"), "MAX_POSITIONS_REACHED");
-        assert_eq!(reason_category("INSUFFICIENT_BALANCE"), "INSUFFICIENT_BALANCE");
-        assert_eq!(reason_category("LEG_FILL_FAILED: Sell on Bybit failed"), "LEG_FILL_FAILED");
+        assert_eq!(
+            reason_category("MAX_POSITIONS_REACHED (1/1 active)"),
+            "MAX_POSITIONS_REACHED"
+        );
+        assert_eq!(
+            reason_category("INSUFFICIENT_BALANCE"),
+            "INSUFFICIENT_BALANCE"
+        );
+        assert_eq!(
+            reason_category("LEG_FILL_FAILED: Sell on Bybit failed"),
+            "LEG_FILL_FAILED"
+        );
     }
 
     #[test]
@@ -220,4 +253,3 @@ mod tests {
         assert!(json_with_lat.contains("\"send_to_ack_ms\":240"));
     }
 }
-

@@ -18,7 +18,6 @@
 ///   5. Parse order events     → fast-fail on Cancelled/Expired with 0 fill
 ///   6. Parse wallet events    → update live balance
 ///   7. Respond to ping with pong to keep connection alive
-
 use super::fill_channel::{FillEvent, LiveBalance, PendingFillMap};
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
@@ -48,27 +47,27 @@ struct AnyMsg {
 #[allow(non_snake_case, dead_code)]
 struct BybitExecEv {
     #[serde(default)]
-    pub orderId:      String,
+    pub orderId: String,
     #[serde(default)]
-    pub orderLinkId:  String,
+    pub orderLinkId: String,
     #[serde(default)]
-    pub symbol:       String,
+    pub symbol: String,
     #[serde(default)]
-    pub side:         String,
+    pub side: String,
     #[serde(default)]
-    pub execPrice:    String,  // price of THIS execution
+    pub execPrice: String, // price of THIS execution
     #[serde(default)]
-    pub execQty:      String,  // qty of THIS execution
+    pub execQty: String, // qty of THIS execution
     #[serde(default)]
-    pub execValue:    String,  // notional of THIS execution
+    pub execValue: String, // notional of THIS execution
     #[serde(default)]
-    pub execFee:      String,  // fee for THIS execution
+    pub execFee: String, // fee for THIS execution
     #[serde(default)]
-    pub execTime:     String,  // execution timestamp (ms)
+    pub execTime: String, // execution timestamp (ms)
     #[serde(default)]
-    pub execType:     String,  // "Trade", "Funding", etc.
+    pub execType: String, // "Trade", "Funding", etc.
     #[serde(default)]
-    pub closedSize:   String,
+    pub closedSize: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,25 +80,25 @@ struct ExecEvMsg {
 #[allow(non_snake_case, dead_code)]
 struct BybitOrderEv {
     #[serde(default)]
-    pub orderId:      String,
+    pub orderId: String,
     #[serde(default)]
-    pub orderLinkId:  String,
+    pub orderLinkId: String,
     #[serde(default)]
-    pub symbol:       String,
+    pub symbol: String,
     #[serde(default)]
-    pub side:         String,
+    pub side: String,
     #[serde(default)]
-    pub orderStatus:  String,
+    pub orderStatus: String,
     #[serde(default)]
-    pub avgPrice:     String,
+    pub avgPrice: String,
     #[serde(default)]
-    pub cumExecQty:   String,
+    pub cumExecQty: String,
     #[serde(default)]
     pub cumExecValue: String,
     #[serde(default)]
-    pub cumExecFee:   String,
+    pub cumExecFee: String,
     #[serde(default)]
-    pub updatedTime:  String,
+    pub updatedTime: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,11 +110,11 @@ struct OrderEvMsg {
 #[derive(Debug, Deserialize)]
 #[allow(non_snake_case, dead_code)]
 struct BybitCoin {
-    pub coin:                 String,
+    pub coin: String,
     #[serde(default)]
-    pub availableToWithdraw:  String,
+    pub availableToWithdraw: String,
     #[serde(default)]
-    pub walletBalance:        String,
+    pub walletBalance: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,7 +122,7 @@ struct BybitCoin {
 struct BybitWalletAccount {
     pub accountType: String,
     #[serde(default)]
-    pub coin:        Vec<BybitCoin>,
+    pub coin: Vec<BybitCoin>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,13 +150,13 @@ fn timestamp_ms() -> u64 {
 /// Run the Bybit private WebSocket listener.
 /// On disconnect, caller should re-invoke (wrapped in a reconnect loop in main.rs).
 pub async fn run(
-    api_key:       String,
-    api_secret:    String,
+    api_key: String,
+    api_secret: String,
     pending_fills: PendingFillMap,
-    live_balance:  LiveBalance,
+    live_balance: LiveBalance,
 ) {
-    let ws_url = url::Url::parse("wss://stream.bybit.com/v5/private")
-        .expect("Invalid Bybit private WS URL");
+    let ws_url =
+        url::Url::parse("wss://stream.bybit.com/v5/private").expect("Invalid Bybit private WS URL");
 
     let (mut ws, _) = match connect_async(ws_url).await {
         Ok(r) => r,
@@ -170,7 +169,7 @@ pub async fn run(
     // ── Step 1: Authenticate ──────────────────────────────────────────────
     // Bybit auth: sign( timestamp + api_key + expires )
     // expires = now_ms + 10_000  (10 second window)
-    let ts    = timestamp_ms();
+    let ts = timestamp_ms();
     let expires = ts + 10_000;
     let payload = format!("GET/realtime{}", expires);
     let signature = sign(&api_secret, &payload);

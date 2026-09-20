@@ -1,8 +1,7 @@
-use crate::price_store::Exchange;
 use crate::latency::TradeLatency;
+use crate::price_store::Exchange;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-
 
 /// Whether this record represents an OPEN or CLOSE of an arbitrage position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,7 +86,6 @@ pub struct TradeRecord {
     pub sell_book_ask_qty: Option<f64>,
 
     // ── Close-specific fields (only present on CLOSE records) ──
-
     /// Price at which the close-leg buy was filled
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_buy_price: Option<f64>,
@@ -266,7 +264,8 @@ pub fn compute_summary(trades: &[TradeRecord]) -> TradeSummary {
         }
 
         // Per-exchange stats
-        let buy_stats = summary.exchange_stats
+        let buy_stats = summary
+            .exchange_stats
             .entry(trade.exchange_buy)
             .or_default();
         buy_stats.trades_as_buy += 1;
@@ -275,7 +274,8 @@ pub fn compute_summary(trades: &[TradeRecord]) -> TradeSummary {
             buy_stats.total_pnl_contribution += trade.pnl_net / 2.0;
         }
 
-        let sell_stats = summary.exchange_stats
+        let sell_stats = summary
+            .exchange_stats
             .entry(trade.exchange_sell)
             .or_default();
         sell_stats.trades_as_sell += 1;

@@ -1,75 +1,3 @@
-//! Trading configuration constants for the live arbitrage bot.
-//! Adjust these values to control risk and trade behavior.
-
-/// Target trade size in USDT per leg (actual size may be reduced based on balance + leverage).
-pub const TRADE_SIZE_USDT: f64 = 6.0;
-
-/// Fixed leverage used on both exchanges for all trades.
-/// This is intentionally hardcoded to avoid the 150–300ms set_leverage API call
-/// on every cache miss. After the first trade on any symbol, leverage is cached
-/// and never re-sent to the exchange.
-pub const FIXED_LEVERAGE: u32 = 10;
-
-/// Minimum USDT balance required on each exchange to allow trading.
-/// If either exchange is below this threshold, trades are skipped entirely.
-pub const MIN_BALANCE_USDT: f64 = 1.0;
-
-/// Minimum spread % to OPEN a new arbitrage position.
-pub const ENTRY_SPREAD_THRESHOLD: f64 = 1.0;
-
-/// Maximum sanity spread % to OPEN a new arbitrage position.
-/// Any spread > 10% is guaranteed to be a ticker collision (e.g. stock vs crypto)
-/// or delisting anomaly — never genuine live arbitrage.
-pub const MAX_SPREAD_THRESHOLD: f64 = 10.0;
-
-/// Maximum allowed orderbook age in milliseconds before a quote is considered stale.
-/// 2000ms ensures quotes are fresh and prevents executing on dormant/stale quotes.
-pub const MAX_BOOK_AGE_MILLIS: u128 = 2000;
-
-/// Maximum acceptable slippage % between quoted orderbook price and executed fill price.
-pub const MAX_ALLOWED_SLIPPAGE_PCT: f64 = 0.35;
-
-/// Spread % at which to CLOSE an open position (spread has converged).
-pub const EXIT_SPREAD_THRESHOLD: f64 = 0.3;
-
-/// Cooldown between opening trades on the same coin (seconds).
-pub const TRADE_COOLDOWN_SECS: i64 = 5;
-
-/// Maximum seconds to hold a position before force-closing.
-/// Set to 0 to disable timeout completely and hold indefinitely until spread converges below exit threshold.
-pub const MAX_HOLD_SECS: i64 = 0;
-
-/// Maximum number of concurrent open arbitrage positions.
-/// Set to 1 for safe real-money testing — only 1 position open at a time.
-pub const MAX_OPEN_POSITIONS: usize = 3;
-
-/// Minutes before/after funding time to PAUSE trading on a coin.
-/// Coins near their funding timestamp are extremely volatile.
-pub const FUNDING_PAUSE_MINUTES: i64 = 5;
-
-/// Stop trading completely on coins with 1-hour funding intervals because they are too volatile.
-/// Set to true to skip any coin with a 1h funding interval.
-pub const SKIP_1H_FUNDING_COINS: bool = true;
-
-/// Taker fee rates per exchange (VIP-0, market order).
-pub fn taker_fee(exchange: crate::price_store::Exchange) -> f64 {
-    match exchange {
-        crate::price_store::Exchange::Binance => 0.0005, // 0.05%
-        crate::price_store::Exchange::Bybit => 0.00055,  // 0.055%
-    }
-}
-
-/// Path for the live trade journal file.
-pub const LIVE_TRADES_LOG_PATH: &str = "live_trades.jsonl";
-
-/// Path for the missed trades log file (human-readable text log).
-pub const MISSED_TRADES_LOG_PATH: &str = "missed_trades.log";
-
-/// Path for the missed trades JSONL file (machine-readable structured JSON lines).
-pub const MISSED_TRADES_JSONL_PATH: &str = "missed_trades.jsonl";
-
-// --- Dynamic Spread-Threshold System v2.0 Configuration ---
-
 #[derive(Debug, Clone)]
 pub struct DynamicSpreadConfig {
     /// Warmup time in seconds before trading is allowed.
@@ -162,22 +90,13 @@ impl DynamicSpreadConfig {
     /// Fails fast by panicking with a clear error message.
     pub fn validate(&self) {
         if self.k_exit >= self.k_entry {
-            panic!(
-                "Configuration Error: k_exit ({}) must be < k_entry ({})",
-                self.k_exit, self.k_entry
-            );
+            panic!("Configuration Error: k_exit ({}) must be < k_entry ({})", self.k_exit, self.k_entry);
         }
         if self.minimum_entry_threshold_pct <= 0.0 {
-            panic!(
-                "Configuration Error: minimum_entry_threshold_pct ({}) must be > 0.0",
-                self.minimum_entry_threshold_pct
-            );
+            panic!("Configuration Error: minimum_entry_threshold_pct ({}) must be > 0", self.minimum_entry_threshold_pct);
         }
         if self.velocity_window_ms > self.max_signal_age_ms {
-            panic!(
-                "Configuration Error: velocity_window_ms ({}) must be <= max_signal_age_ms ({})",
-                self.velocity_window_ms, self.max_signal_age_ms
-            );
+            panic!("Configuration Error: velocity_window_ms ({}) must be <= max_signal_age_ms ({})", self.velocity_window_ms, self.max_signal_age_ms);
         }
         if self.minimum_exit_threshold_pct > self.maximum_exit_threshold_pct {
             panic!("Configuration Error: minimum_exit_threshold_pct ({}) must be <= maximum_exit_threshold_pct ({})", self.minimum_exit_threshold_pct, self.maximum_exit_threshold_pct);
@@ -185,7 +104,7 @@ impl DynamicSpreadConfig {
         if self.minimum_samples == 0 || self.warmup_seconds == 0 {
             panic!("Configuration Error: minimum_samples ({}) and warmup_seconds ({}) must both be > 0", self.minimum_samples, self.warmup_seconds);
         }
-
+        
         // Unit convention checks: 1.0 means 1.0%. Assert plausibility for percentage-like values.
         let binance_fee = taker_fee(crate::price_store::Exchange::Binance) * 100.0;
         if binance_fee >= 2.0 {
@@ -220,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "must be > 0.0")]
+    #[should_panic(expected = "must be > 0")]
     fn test_dynamic_config_minimum_entry_threshold_pct_le_zero() {
         let mut config = DynamicSpreadConfig::default();
         config.minimum_entry_threshold_pct = 0.0;
@@ -268,4 +187,8 @@ mod tests {
         config.max_slippage_pct = 6.0; // Over the 5.0% cap
         config.validate();
     }
+
+    // Since taker_fee is hardcoded to 0.0005 (0.05%), we can't easily change it in this test without modifying the function.
+    // The validation function reads it dynamically. We will just trust that the function works, or we can mock it.
+    // For now, testing slippage covers the plausibility of the unit convention.
 }

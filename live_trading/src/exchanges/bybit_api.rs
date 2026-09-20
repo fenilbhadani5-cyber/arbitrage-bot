@@ -1,11 +1,10 @@
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use serde::Deserialize;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::oneshot;
 use super::fill_channel::{FillEvent, LiveBalance, PendingFillMap};
 use chrono::Utc;
-
+use hmac::{Hmac, Mac};
+use serde::Deserialize;
+use sha2::Sha256;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::oneshot;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -14,18 +13,18 @@ type HmacSha256 = Hmac<Sha256>;
 /// Fill confirmations are received via private WS (PendingFillMap) instead of REST polling.
 #[derive(Clone)]
 pub struct BybitClient {
-    api_key:       String,
-    api_secret:    String,
+    api_key: String,
+    api_secret: String,
     /// Client with shorter timeout for latency-critical order placement.
-    http_fast:     reqwest::Client,
+    http_fast: reqwest::Client,
     /// Client with standard timeout for non-critical queries (balances, positions).
-    http_slow:     reqwest::Client,
-    base_url:      String,
-    recv_window:   String,
+    http_slow: reqwest::Client,
+    base_url: String,
+    recv_window: String,
     /// Registry of orders waiting for a WS fill event.
     pending_fills: PendingFillMap,
     /// Live USDT balance updated in real-time by the private WS wallet event.
-    live_balance:  LiveBalance,
+    live_balance: LiveBalance,
 }
 
 /// Bybit generic API response wrapper.
@@ -158,10 +157,10 @@ impl BybitClient {
     /// Create a new Bybit V5 API client.
     /// Uses a fast 3s timeout for orders and a slower 8s timeout for account queries.
     pub fn new(
-        api_key:       String,
-        api_secret:    String,
+        api_key: String,
+        api_secret: String,
         pending_fills: PendingFillMap,
-        live_balance:  LiveBalance,
+        live_balance: LiveBalance,
     ) -> Self {
         let http_fast = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
@@ -221,8 +220,8 @@ impl BybitClient {
             "{}{}{}{}",
             timestamp, self.api_key, self.recv_window, payload
         );
-        let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes())
-            .expect("HMAC key error");
+        let mut mac =
+            HmacSha256::new_from_slice(self.api_secret.as_bytes()).expect("HMAC key error");
         mac.update(pre_sign.as_bytes());
         hex::encode(mac.finalize().into_bytes())
     }
@@ -251,11 +250,15 @@ impl BybitClient {
             req = req.header(key, val);
         }
 
-        let resp = req.send().await
+        let resp = req
+            .send()
+            .await
             .map_err(|e| format!("Bybit balance request failed: {}", e))?;
 
         let status = resp.status();
-        let text = resp.text().await
+        let text = resp
+            .text()
+            .await
             .map_err(|e| format!("Failed to read response: {}", e))?;
 
         if !status.is_success() {
@@ -266,7 +269,10 @@ impl BybitClient {
             .map_err(|e| format!("Failed to parse balance: {} | body: {}", e, text))?;
 
         if api_resp.retCode != 0 {
-            return Err(format!("Bybit API error: {} - {}", api_resp.retCode, api_resp.retMsg));
+            return Err(format!(
+                "Bybit API error: {} - {}",
+                api_resp.retCode, api_resp.retMsg
+            ));
         }
 
         let parse_val = |s: &str| -> Option<f64> {
@@ -344,12 +350,19 @@ impl BybitClient {
         let url = format!("{}/v5/order/create", self.base_url);
 
         if let Some(p) = price {
-            eprintln!("[BybitAPI] Placing {} {} {} @ LIMIT IOC {:.6} (linkId={})", side, quantity, symbol, p, order_link_id);
+            eprintln!(
+                "[BybitAPI] Placing {} {} {} @ LIMIT IOC {:.6} (linkId={})",
+                side, quantity, symbol, p, order_link_id
+            );
         } else {
-            eprintln!("[BybitAPI] Placing {} {} {} @ MARKET (linkId={})", side, quantity, symbol, order_link_id);
+            eprintln!(
+                "[BybitAPI] Placing {} {} {} @ MARKET (linkId={})",
+                side, quantity, symbol, order_link_id
+            );
         }
 
-        let mut req = self.http_fast
+        let mut req = self
+            .http_fast
             .post(&url)
             .header("Content-Type", "application/json")
             .body(body_str);
@@ -358,11 +371,15 @@ impl BybitClient {
             req = req.header(key, val);
         }
 
-        let resp = req.send().await
+        let resp = req
+            .send()
+            .await
             .map_err(|e| format!("Bybit order request failed: {}", e))?;
 
         let status = resp.status();
-        let text = resp.text().await
+        let text = resp
+            .text()
+            .await
             .map_err(|e| format!("Failed to read response: {}", e))?;
 
         if !status.is_success() {
@@ -373,13 +390,17 @@ impl BybitClient {
             .map_err(|e| format!("Failed to parse order response: {} | body: {}", e, text))?;
 
         if api_resp.retCode != 0 {
-            return Err(format!("Bybit order error: {} - {}", api_resp.retCode, api_resp.retMsg));
+            return Err(format!(
+                "Bybit order error: {} - {}",
+                api_resp.retCode, api_resp.retMsg
+            ));
         }
 
         eprintln!(
             "[{}][BybitAPI] Order placed: id={} linkId={}",
             Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-            api_resp.result.orderId, order_link_id
+            api_resp.result.orderId,
+            order_link_id
         );
 
         Ok(api_resp.result)
@@ -393,10 +414,7 @@ impl BybitClient {
         order_id: &str,
     ) -> Result<BybitOrderDetail, String> {
         let ts = Self::timestamp_ms();
-        let query = format!(
-            "category=linear&symbol={}&orderId={}",
-            symbol, order_id
-        );
+        let query = format!("category=linear&symbol={}&orderId={}", symbol, order_id);
         let signature = self.sign(ts, &query);
         let url = format!("{}/v5/order/realtime?{}", self.base_url, query);
 
@@ -405,25 +423,39 @@ impl BybitClient {
             req = req.header(key, val);
         }
 
-        let resp = req.send().await
+        let resp = req
+            .send()
+            .await
             .map_err(|e| format!("Bybit order detail request failed: {}", e))?;
 
         let status = resp.status();
-        let text = resp.text().await
+        let text = resp
+            .text()
+            .await
             .map_err(|e| format!("Failed to read response: {}", e))?;
 
         if !status.is_success() {
-            return Err(format!("Bybit order detail API error ({}): {}", status, text));
+            return Err(format!(
+                "Bybit order detail API error ({}): {}",
+                status, text
+            ));
         }
 
         let api_resp: BybitResponse<BybitOrderDetailResult> = serde_json::from_str(&text)
             .map_err(|e| format!("Failed to parse order detail: {} | body: {}", e, text))?;
 
         if api_resp.retCode != 0 {
-            return Err(format!("Bybit API error: {} - {}", api_resp.retCode, api_resp.retMsg));
+            return Err(format!(
+                "Bybit API error: {} - {}",
+                api_resp.retCode, api_resp.retMsg
+            ));
         }
 
-        api_resp.result.list.into_iter().next()
+        api_resp
+            .result
+            .list
+            .into_iter()
+            .next()
             .ok_or_else(|| "Order not found".to_string())
     }
 
@@ -435,10 +467,7 @@ impl BybitClient {
         order_id: &str,
     ) -> Result<Vec<BybitExecution>, String> {
         let ts = Self::timestamp_ms();
-        let query = format!(
-            "category=linear&symbol={}&orderId={}",
-            symbol, order_id
-        );
+        let query = format!("category=linear&symbol={}&orderId={}", symbol, order_id);
         let signature = self.sign(ts, &query);
         let url = format!("{}/v5/execution/list?{}", self.base_url, query);
 
@@ -447,11 +476,15 @@ impl BybitClient {
             req = req.header(key, val);
         }
 
-        let resp = req.send().await
+        let resp = req
+            .send()
+            .await
             .map_err(|e| format!("Bybit executions request failed: {}", e))?;
 
         let status = resp.status();
-        let text = resp.text().await
+        let text = resp
+            .text()
+            .await
             .map_err(|e| format!("Failed to read response: {}", e))?;
 
         if !status.is_success() {
@@ -462,7 +495,10 @@ impl BybitClient {
             .map_err(|e| format!("Failed to parse executions: {} | body: {}", e, text))?;
 
         if api_resp.retCode != 0 {
-            return Err(format!("Bybit API error: {} - {}", api_resp.retCode, api_resp.retMsg));
+            return Err(format!(
+                "Bybit API error: {} - {}",
+                api_resp.retCode, api_resp.retMsg
+            ));
         }
 
         Ok(api_resp.result.list)
@@ -477,24 +513,30 @@ impl BybitClient {
     /// `reduce_only`: pass `true` for close orders to prevent opening new positions.
     pub async fn execute_order_with_fill(
         &self,
-        symbol:      &str,
-        side:        &str,
-        quantity:    f64,
+        symbol: &str,
+        side: &str,
+        quantity: f64,
         reduce_only: bool,
-        price:       Option<f64>,
+        price: Option<f64>,
     ) -> Result<OrderFill, String> {
         // Generate a unique client order ID and register the fill channel FIRST
         // so it's ready before the WS fill event can arrive.
-        let order_link_id = format!("arb-{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros());
+        let order_link_id = format!(
+            "arb-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros()
+        );
 
         let (tx, rx) = oneshot::channel::<FillEvent>();
         self.pending_fills.insert(order_link_id.clone(), tx);
 
         // Place the order — fill may arrive via WS while this is in-flight
-        let order = match self.place_order(symbol, side, quantity, &order_link_id, reduce_only, price).await {
+        let order = match self
+            .place_order(symbol, side, quantity, &order_link_id, reduce_only, price)
+            .await
+        {
             Ok(o) => o,
             Err(e) => {
                 // Order failed — clean up the registered channel
@@ -526,14 +568,14 @@ impl BybitClient {
                     fill.order_id, fill.avg_price, fill.filled_qty, fill.commission
                 );
                 Ok(OrderFill {
-                    order_id:   order.orderId,
-                    symbol:     symbol.to_string(),
-                    side:       side.to_string(),
-                    avg_price:  fill.avg_price,
+                    order_id: order.orderId,
+                    symbol: symbol.to_string(),
+                    side: side.to_string(),
+                    avg_price: fill.avg_price,
                     filled_qty: fill.filled_qty,
-                    quote_qty:  fill.quote_qty,
+                    quote_qty: fill.quote_qty,
                     commission: fill.commission,
-                    timestamp:  fill.timestamp,
+                    timestamp: fill.timestamp,
                 })
             }
             _ => {
@@ -547,36 +589,39 @@ impl BybitClient {
                 // Attempt REST fallback to get actual fill price
                 match self.get_order_detail(symbol, &order.orderId).await {
                     Ok(detail) => {
-                        let avg_price  = detail.avgPrice.parse::<f64>().unwrap_or(0.0);
+                        let avg_price = detail.avgPrice.parse::<f64>().unwrap_or(0.0);
                         let filled_qty = detail.cumExecQty.parse::<f64>().unwrap_or(quantity);
-                        let quote_qty  = detail.cumExecValue.parse::<f64>().unwrap_or(0.0);
+                        let quote_qty = detail.cumExecValue.parse::<f64>().unwrap_or(0.0);
                         let commission = detail.cumExecFee.parse::<f64>().unwrap_or(0.0).abs();
                         eprintln!(
                             "[BybitAPI] REST fallback: id={} avgPrice={} qty={} fee={}",
                             order.orderId, avg_price, filled_qty, commission
                         );
                         Ok(OrderFill {
-                            order_id:   order.orderId,
-                            symbol:     symbol.to_string(),
-                            side:       side.to_string(),
+                            order_id: order.orderId,
+                            symbol: symbol.to_string(),
+                            side: side.to_string(),
                             avg_price,
                             filled_qty,
                             quote_qty,
                             commission,
-                            timestamp:  0,
+                            timestamp: 0,
                         })
                     }
                     Err(e) => {
-                        eprintln!("[BybitAPI] REST fallback also failed: {} — using estimated data", e);
+                        eprintln!(
+                            "[BybitAPI] REST fallback also failed: {} — using estimated data",
+                            e
+                        );
                         Ok(OrderFill {
-                            order_id:   order.orderId,
-                            symbol:     symbol.to_string(),
-                            side:       side.to_string(),
-                            avg_price:  0.0, // will be caught by safety check
+                            order_id: order.orderId,
+                            symbol: symbol.to_string(),
+                            side: side.to_string(),
+                            avg_price: 0.0, // will be caught by safety check
                             filled_qty: quantity,
-                            quote_qty:  0.0,
+                            quote_qty: 0.0,
                             commission: 0.0,
-                            timestamp:  0,
+                            timestamp: 0,
                         })
                     }
                 }
@@ -602,7 +647,8 @@ impl BybitClient {
         let signature = self.sign(ts, &body_str);
         let url = format!("{}/v5/position/set-leverage", self.base_url);
 
-        let mut req = self.http_fast
+        let mut req = self
+            .http_fast
             .post(&url)
             .header("Content-Type", "application/json")
             .body(body_str);
@@ -611,25 +657,38 @@ impl BybitClient {
             req = req.header(key, val);
         }
 
-        let resp = req.send().await
+        let resp = req
+            .send()
+            .await
             .map_err(|e| format!("Bybit set leverage request failed: {}", e))?;
 
         let status = resp.status();
-        let text = resp.text().await
+        let text = resp
+            .text()
+            .await
             .map_err(|e| format!("Failed to read response: {}", e))?;
 
         if !status.is_success() {
-            return Err(format!("Bybit set leverage API error ({}): {}", status, text));
+            return Err(format!(
+                "Bybit set leverage API error ({}): {}",
+                status, text
+            ));
         }
 
         // Parse response to check retCode — 110043 means "leverage not modified" which is OK
         #[derive(serde::Deserialize)]
         #[allow(non_snake_case)]
-        struct LevResp { retCode: i32, retMsg: String }
+        struct LevResp {
+            retCode: i32,
+            retMsg: String,
+        }
 
         if let Ok(r) = serde_json::from_str::<LevResp>(&text) {
             if r.retCode != 0 && r.retCode != 110043 {
-                return Err(format!("Bybit set leverage error: {} - {}", r.retCode, r.retMsg));
+                return Err(format!(
+                    "Bybit set leverage error: {} - {}",
+                    r.retCode, r.retMsg
+                ));
             }
         }
 
@@ -650,11 +709,15 @@ impl BybitClient {
             req = req.header(key, val);
         }
 
-        let resp = req.send().await
+        let resp = req
+            .send()
+            .await
             .map_err(|e| format!("Bybit positions request failed: {}", e))?;
 
         let status = resp.status();
-        let text = resp.text().await
+        let text = resp
+            .text()
+            .await
             .map_err(|e| format!("Failed to read response: {}", e))?;
 
         if !status.is_success() {
@@ -665,12 +728,18 @@ impl BybitClient {
             .map_err(|e| format!("Failed to parse positions: {} | body: {}", e, text))?;
 
         if api_resp.retCode != 0 {
-            return Err(format!("Bybit API error: {} - {}", api_resp.retCode, api_resp.retMsg));
+            return Err(format!(
+                "Bybit API error: {} - {}",
+                api_resp.retCode, api_resp.retMsg
+            ));
         }
 
         // Filter to non-zero positions
-        Ok(api_resp.result.list.into_iter().filter(|p| {
-            p.size.parse::<f64>().unwrap_or(0.0).abs() > 0.0
-        }).collect())
+        Ok(api_resp
+            .result
+            .list
+            .into_iter()
+            .filter(|p| p.size.parse::<f64>().unwrap_or(0.0).abs() > 0.0)
+            .collect())
     }
 }

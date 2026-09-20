@@ -1,12 +1,11 @@
 use crate::price_store::{normalize_symbol, FundingStore, PriceStore, SharedStatus};
+use chrono::Utc;
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use url::Url;
-use chrono::Utc;
-
 
 /// Binance exchange info for filtering perpetual USDT-M futures only.
 #[derive(Debug, Deserialize)]
@@ -23,10 +22,6 @@ struct BinanceSymbolInfo {
     contractType: Option<String>,
     marginAsset: Option<String>,
 }
-
-
-
-
 
 /// Binance WebSocket individual bookTicker data (from <symbol>@bookTicker stream).
 #[derive(Debug, Deserialize)]
@@ -58,7 +53,10 @@ struct CombinedBookTicker {
 fn parse_book_ticker(
     text: &str,
     perpetual_symbols: &std::collections::HashSet<String>,
-    batch: &mut std::collections::HashMap<String, (Option<f64>, Option<f64>, Option<f64>, Option<f64>)>,
+    batch: &mut std::collections::HashMap<
+        String,
+        (Option<f64>, Option<f64>, Option<f64>, Option<f64>),
+    >,
 ) {
     if let Ok(msg) = serde_json::from_str::<CombinedBookTicker>(text) {
         if perpetual_symbols.contains(&msg.data.s) {
@@ -82,7 +80,6 @@ fn clear_binance_prices(store: &PriceStore) {
         v.binance_book_updated = None;
     }
 }
-
 
 /// Connects to Binance Futures via WebSocket for real-time price and orderbook data.
 /// Pure WS-only: uses !bookTicker all-symbol stream (tick-by-tick, no REST polling).
@@ -155,7 +152,10 @@ pub async fn run(store: PriceStore, status: SharedStatus, funding: FundingStore)
     let (ws_stream, _) = match connect_async(url).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[Binance] WebSocket connection failed: {} — falling back to REST", e);
+            eprintln!(
+                "[Binance] WebSocket connection failed: {} — falling back to REST",
+                e
+            );
             status.binance_connected.store(false, Ordering::Relaxed);
             return;
         }

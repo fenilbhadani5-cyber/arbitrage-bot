@@ -1,15 +1,17 @@
 use crate::config::*;
-use crate::exchanges::exchange_info::ExchangeInfoCache;
 use crate::exchanges::binance_api::BinanceClient;
 use crate::exchanges::bybit_api::BybitClient;
+use crate::exchanges::exchange_info::ExchangeInfoCache;
 use crate::funding;
 use crate::latency::TradeLatency;
-use crate::price_store::{Exchange, FundingStore, OrderBookEntry, PriceStore, get_order_book, get_price};
-use crate::trade_journal::{TradeRecord, TradeType, save_trade};
+use crate::price_store::{
+    get_order_book, get_price, Exchange, FundingStore, OrderBookEntry, PriceStore,
+};
+use crate::trade_journal::{save_trade, TradeRecord, TradeType};
+use chrono::Utc;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use chrono::Utc;
 
 /// An open arbitrage position: bought on one exchange, sold on another,
 /// waiting for spread to converge so we can close profitably.
@@ -157,7 +159,13 @@ impl LiveTradingEngine {
     }
 
     /// Round quantity using exchange-specific step size if available, else heuristic.
-    pub async fn round_quantity_exact(&self, symbol: &str, exchange: Exchange, quantity: f64, price: f64) -> f64 {
+    pub async fn round_quantity_exact(
+        &self,
+        symbol: &str,
+        exchange: Exchange,
+        quantity: f64,
+        price: f64,
+    ) -> f64 {
         let info = match exchange {
             Exchange::Binance => self.exchange_info.get_binance(symbol).await,
             Exchange::Bybit => self.exchange_info.get_bybit(symbol).await,
@@ -171,7 +179,13 @@ impl LiveTradingEngine {
     /// Round a limit price to the exchange's tick size.
     /// For BUY: round UP (we're willing to pay up to this price).
     /// For SELL: round DOWN (we're willing to sell at least at this price).
-    pub async fn round_price(&self, symbol: &str, exchange: Exchange, price: f64, is_buy: bool) -> f64 {
+    pub async fn round_price(
+        &self,
+        symbol: &str,
+        exchange: Exchange,
+        price: f64,
+        is_buy: bool,
+    ) -> f64 {
         let info = match exchange {
             Exchange::Binance => self.exchange_info.get_binance(symbol).await,
             Exchange::Bybit => self.exchange_info.get_bybit(symbol).await,
@@ -209,7 +223,8 @@ impl LiveTradingEngine {
         for (coin, pos) in &self.open_positions {
             if let Some(prices) = store.get(coin) {
                 let buy_price = get_price(&prices, pos.buy_exchange).unwrap_or(pos.entry_buy_price);
-                let sell_price = get_price(&prices, pos.sell_exchange).unwrap_or(pos.entry_sell_price);
+                let sell_price =
+                    get_price(&prices, pos.sell_exchange).unwrap_or(pos.entry_sell_price);
                 total += pos.unrealized_pnl(buy_price, sell_price);
             }
         }
@@ -256,7 +271,15 @@ impl LiveTradingEngine {
         reason: String,
     ) {
         self.log_missed_with_latency(
-            coin, buy_exchange, sell_exchange, buy_price, sell_price, spread, book_spread, reason, None,
+            coin,
+            buy_exchange,
+            sell_exchange,
+            buy_price,
+            sell_price,
+            spread,
+            book_spread,
+            reason,
+            None,
         );
     }
 
@@ -273,21 +296,23 @@ impl LiveTradingEngine {
         reason: String,
         latency: Option<crate::latency::TradeLatency>,
     ) {
-        crate::missed_trade_logger::log_missed_trade(&crate::missed_trade_logger::MissedTradeRecord {
-            timestamp: Utc::now(),
-            coin: coin.to_string(),
-            spread_pct: spread,
-            threshold_pct: ENTRY_SPREAD_THRESHOLD,
-            buy_exchange,
-            sell_exchange,
-            buy_price,
-            sell_price,
-            book_spread_pct: book_spread,
-            reason,
-            binance_balance: self.binance_balance,
-            bybit_balance: self.bybit_balance,
-            latency,
-        });
+        crate::missed_trade_logger::log_missed_trade(
+            &crate::missed_trade_logger::MissedTradeRecord {
+                timestamp: Utc::now(),
+                coin: coin.to_string(),
+                spread_pct: spread,
+                threshold_pct: ENTRY_SPREAD_THRESHOLD,
+                buy_exchange,
+                sell_exchange,
+                buy_price,
+                sell_price,
+                book_spread_pct: book_spread,
+                reason,
+                binance_balance: self.binance_balance,
+                bybit_balance: self.bybit_balance,
+                latency,
+            },
+        );
     }
 
     /// Update real balances from both exchanges.
@@ -303,8 +328,12 @@ impl LiveTradingEngine {
         } else {
             // WS not yet warmed up — fall back to REST once
             match self.binance_client.get_balance().await {
-                Ok(bal) => { self.binance_balance = bal; }
-                Err(e)  => { eprintln!("[LiveTrading] Failed to fetch Binance balance: {}", e); }
+                Ok(bal) => {
+                    self.binance_balance = bal;
+                }
+                Err(e) => {
+                    eprintln!("[LiveTrading] Failed to fetch Binance balance: {}", e);
+                }
             }
         }
 
@@ -312,8 +341,12 @@ impl LiveTradingEngine {
             self.bybit_balance = byb_ws;
         } else {
             match self.bybit_client.get_balance().await {
-                Ok(bal) => { self.bybit_balance = bal; }
-                Err(e)  => { eprintln!("[LiveTrading] Failed to fetch Bybit balance: {}", e); }
+                Ok(bal) => {
+                    self.bybit_balance = bal;
+                }
+                Err(e) => {
+                    eprintln!("[LiveTrading] Failed to fetch Bybit balance: {}", e);
+                }
             }
         }
     }
@@ -350,11 +383,9 @@ impl LiveTradingEngine {
         }
 
         // Trade size = configured target, capped by what 10x leverage can support on each side
-        let buy_max_notional  = buy_balance  * (FIXED_LEVERAGE as f64);
+        let buy_max_notional = buy_balance * (FIXED_LEVERAGE as f64);
         let sell_max_notional = sell_balance * (FIXED_LEVERAGE as f64);
-        let target_usdt = TRADE_SIZE_USDT
-            .min(buy_max_notional)
-            .min(sell_max_notional);
+        let target_usdt = TRADE_SIZE_USDT.min(buy_max_notional).min(sell_max_notional);
 
         // Skip micro-trades
         if target_usdt < 5.0 {
@@ -390,6 +421,8 @@ impl LiveTradingEngine {
         buy_last_price: f64,
         sell_last_price: f64,
         spread: f64,
+        dynamic_entry: f64,
+        spread_velocity: f64,
         funding_store: &FundingStore,
         price_store: &PriceStore,
         mut latency: TradeLatency,
@@ -397,7 +430,13 @@ impl LiveTradingEngine {
         // Already have a position on this coin
         if self.open_positions.contains_key(coin) {
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_last_price, sell_last_price, spread, None,
+                coin,
+                buy_exchange,
+                sell_exchange,
+                buy_last_price,
+                sell_last_price,
+                spread,
+                None,
                 "ALREADY_OPEN: Position already open on this coin".to_string(),
             );
             return false;
@@ -417,8 +456,17 @@ impl LiveTradingEngine {
         if self.is_on_cooldown(coin) {
             let rem = self.cooldown_remaining_secs(coin).unwrap_or(0);
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_last_price, sell_last_price, spread, None,
-                format!("COOLDOWN: Coin in cooldown ({}s remaining of {}s)", rem, TRADE_COOLDOWN_SECS),
+                coin,
+                buy_exchange,
+                sell_exchange,
+                buy_last_price,
+                sell_last_price,
+                spread,
+                None,
+                format!(
+                    "COOLDOWN: Coin in cooldown ({}s remaining of {}s)",
+                    rem, TRADE_COOLDOWN_SECS
+                ),
             );
             return false;
         }
@@ -430,10 +478,26 @@ impl LiveTradingEngine {
 
         // Check max open positions
         if self.open_positions.len() >= MAX_OPEN_POSITIONS {
-            let holding = self.open_positions.keys().cloned().collect::<Vec<_>>().join(", ");
+            let holding = self
+                .open_positions
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_last_price, sell_last_price, spread, None,
-                format!("MAX_POSITIONS_REACHED: Currently {}/{} open positions (holding: {})", self.open_positions.len(), MAX_OPEN_POSITIONS, holding),
+                coin,
+                buy_exchange,
+                sell_exchange,
+                buy_last_price,
+                sell_last_price,
+                spread,
+                None,
+                format!(
+                    "MAX_POSITIONS_REACHED: Currently {}/{} open positions (holding: {})",
+                    self.open_positions.len(),
+                    MAX_OPEN_POSITIONS,
+                    holding
+                ),
             );
             return false;
         }
@@ -447,8 +511,17 @@ impl LiveTradingEngine {
                 coin
             );
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_last_price, sell_last_price, spread, None,
-                format!("1H_FUNDING_COIN: Skipped coin with {}h funding interval (high volatility)", funding_hours),
+                coin,
+                buy_exchange,
+                sell_exchange,
+                buy_last_price,
+                sell_last_price,
+                spread,
+                None,
+                format!(
+                    "1H_FUNDING_COIN: Skipped coin with {}h funding interval (high volatility)",
+                    funding_hours
+                ),
             );
             return false;
         }
@@ -461,8 +534,17 @@ impl LiveTradingEngine {
                 coin, countdown
             );
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_last_price, sell_last_price, spread, None,
-                format!("NEAR_FUNDING: Within {}m funding pause window (next funding in {})", FUNDING_PAUSE_MINUTES, countdown),
+                coin,
+                buy_exchange,
+                sell_exchange,
+                buy_last_price,
+                sell_last_price,
+                spread,
+                None,
+                format!(
+                    "NEAR_FUNDING: Within {}m funding pause window (next funding in {})",
+                    FUNDING_PAUSE_MINUTES, countdown
+                ),
             );
             return false;
         }
@@ -472,8 +554,17 @@ impl LiveTradingEngine {
             Some(a) if a > 0.0 => a,
             _ => {
                 self.log_missed(
-                    coin, buy_exchange, sell_exchange, buy_last_price, sell_last_price, spread, None,
-                    format!("ORDERBOOK_EMPTY: Missing best ask in {} order book", buy_exchange),
+                    coin,
+                    buy_exchange,
+                    sell_exchange,
+                    buy_last_price,
+                    sell_last_price,
+                    spread,
+                    None,
+                    format!(
+                        "ORDERBOOK_EMPTY: Missing best ask in {} order book",
+                        buy_exchange
+                    ),
                 );
                 return false;
             }
@@ -482,8 +573,17 @@ impl LiveTradingEngine {
             Some(b) if b > 0.0 => b,
             _ => {
                 self.log_missed(
-                    coin, buy_exchange, sell_exchange, buy_last_price, sell_last_price, spread, None,
-                    format!("ORDERBOOK_EMPTY: Missing best bid in {} order book", sell_exchange),
+                    coin,
+                    buy_exchange,
+                    sell_exchange,
+                    buy_last_price,
+                    sell_last_price,
+                    spread,
+                    None,
+                    format!(
+                        "ORDERBOOK_EMPTY: Missing best bid in {} order book",
+                        sell_exchange
+                    ),
                 );
                 return false;
             }
@@ -492,8 +592,17 @@ impl LiveTradingEngine {
         if buy_ask >= sell_bid {
             let raw_book_spread = ((sell_bid - buy_ask) / buy_ask) * 100.0;
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(raw_book_spread),
-                format!("ORDERBOOK_CROSSED: Buy ask ({:.6}) >= Sell bid ({:.6})", buy_ask, sell_bid),
+                coin,
+                buy_exchange,
+                sell_exchange,
+                buy_ask,
+                sell_bid,
+                spread,
+                Some(raw_book_spread),
+                format!(
+                    "ORDERBOOK_CROSSED: Buy ask ({:.6}) >= Sell bid ({:.6})",
+                    buy_ask, sell_bid
+                ),
             );
             return false;
         }
@@ -507,15 +616,26 @@ impl LiveTradingEngine {
         }
         if book_spread_pct > MAX_SPREAD_THRESHOLD {
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
-                format!("BOOK_SPREAD_TOO_HIGH: Orderbook spread {:.2}% > max sanity {:.2}%", book_spread_pct, MAX_SPREAD_THRESHOLD),
+                coin,
+                buy_exchange,
+                sell_exchange,
+                buy_ask,
+                sell_bid,
+                spread,
+                Some(book_spread_pct),
+                format!(
+                    "BOOK_SPREAD_TOO_HIGH: Orderbook spread {:.2}% > max sanity {:.2}%",
+                    book_spread_pct, MAX_SPREAD_THRESHOLD
+                ),
             );
             return false; // Orderbook spread exceeds sanity ceiling
         }
 
         // Estimate total fees for all 4 legs
-        let total_fee_rate = taker_fee(buy_exchange) + taker_fee(sell_exchange)
-                           + taker_fee(buy_exchange) + taker_fee(sell_exchange);
+        let total_fee_rate = taker_fee(buy_exchange)
+            + taker_fee(sell_exchange)
+            + taker_fee(buy_exchange)
+            + taker_fee(sell_exchange);
         let total_fee_pct = total_fee_rate * 100.0;
 
         let min_profitable_spread = total_fee_pct + EXIT_SPREAD_THRESHOLD + 0.1;
@@ -529,10 +649,9 @@ impl LiveTradingEngine {
 
         // ── FIXED LEVERAGE TRADE SIZING ──
         // Always uses FIXED_LEVERAGE (10x) — no recalculation per trade.
-        let (mut trade_usdt, leverage) = match self.calculate_trade_params(
-            buy_exchange,
-            sell_exchange,
-        ) {
+        let (mut trade_usdt, leverage) = match self
+            .calculate_trade_params(buy_exchange, sell_exchange)
+        {
             Some(params) => params,
             None => {
                 self.log_missed(
@@ -549,8 +668,17 @@ impl LiveTradingEngine {
             Some(q) if q > 0.0 => q,
             _ => {
                 self.log_missed(
-                    coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
-                    format!("ORDERBOOK_EMPTY: Missing best ask qty in {} order book", buy_exchange),
+                    coin,
+                    buy_exchange,
+                    sell_exchange,
+                    buy_ask,
+                    sell_bid,
+                    spread,
+                    Some(book_spread_pct),
+                    format!(
+                        "ORDERBOOK_EMPTY: Missing best ask qty in {} order book",
+                        buy_exchange
+                    ),
                 );
                 return false;
             }
@@ -560,8 +688,17 @@ impl LiveTradingEngine {
             Some(q) if q > 0.0 => q,
             _ => {
                 self.log_missed(
-                    coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
-                    format!("ORDERBOOK_EMPTY: Missing best bid qty in {} order book", sell_exchange),
+                    coin,
+                    buy_exchange,
+                    sell_exchange,
+                    buy_ask,
+                    sell_bid,
+                    spread,
+                    Some(book_spread_pct),
+                    format!(
+                        "ORDERBOOK_EMPTY: Missing best bid qty in {} order book",
+                        sell_exchange
+                    ),
                 );
                 return false;
             }
@@ -573,8 +710,12 @@ impl LiveTradingEngine {
 
         // Cap our trade size to the MINIMUM available liquidity on either side
         // to ensure we don't eat into the book and cause massive slippage.
-        if buy_liquidity < trade_usdt { trade_usdt = buy_liquidity; }
-        if sell_liquidity < trade_usdt { trade_usdt = sell_liquidity; }
+        if buy_liquidity < trade_usdt {
+            trade_usdt = buy_liquidity;
+        }
+        if sell_liquidity < trade_usdt {
+            trade_usdt = sell_liquidity;
+        }
 
         // Skip micro-trades after liquidity adjustment
         if trade_usdt < 5.0 {
@@ -588,7 +729,7 @@ impl LiveTradingEngine {
         // Calculate quantities in coin units — calculated PER EXCHANGE using that side's price.
         // BUG FIX: Using one shared quantity (trade_usdt / buy_ask) causes mismatch because
         // the sell exchange's price is always HIGHER, meaning it fills FEWER coins for the same USDT.
-        let buy_quantity  = trade_usdt / buy_ask;
+        let buy_quantity = trade_usdt / buy_ask;
         let sell_quantity = trade_usdt / sell_bid;
         // Use the MINIMUM of the two as the conservative hedged quantity for both sides.
         let raw_quantity = buy_quantity.min(sell_quantity);
@@ -598,14 +739,27 @@ impl LiveTradingEngine {
 
         // Use exchange-specific step size for precise rounding (falls back to heuristic).
         // Use the stricter (larger step) of the two exchanges to satisfy both.
-        let qty_binance = self.round_quantity_exact(&symbol, Exchange::Binance, raw_quantity, buy_ask).await;
-        let qty_bybit = self.round_quantity_exact(&symbol, Exchange::Bybit, raw_quantity, buy_ask).await;
+        let qty_binance = self
+            .round_quantity_exact(&symbol, Exchange::Binance, raw_quantity, buy_ask)
+            .await;
+        let qty_bybit = self
+            .round_quantity_exact(&symbol, Exchange::Bybit, raw_quantity, buy_ask)
+            .await;
         let quantity = qty_binance.min(qty_bybit);
 
         if quantity <= 0.0 {
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
-                format!("QTY_ZERO: Calculated quantity rounded to 0.0 (price=${:.4})", buy_ask),
+                coin,
+                buy_exchange,
+                sell_exchange,
+                buy_ask,
+                sell_bid,
+                spread,
+                Some(book_spread_pct),
+                format!(
+                    "QTY_ZERO: Calculated quantity rounded to 0.0 (price=${:.4})",
+                    buy_ask
+                ),
             );
             return false;
         }
@@ -635,7 +789,7 @@ impl LiveTradingEngine {
         //   • post-trade refresh after every open/close
         //   • periodic refresh every 60 seconds
         // No need to hit the exchange REST API again here — that costs 50–150ms.
-        let buy_balance  = self.get_balance(buy_exchange);
+        let buy_balance = self.get_balance(buy_exchange);
         let sell_balance = self.get_balance(sell_exchange);
 
         // Each side needs at least (trade_usdt / 10x) as margin, +10% buffer for fees and slippage.
@@ -666,29 +820,41 @@ impl LiveTradingEngine {
 
         // ── SET LEVERAGE (cached — same 10x on both exchanges, skipped after first trade per symbol) ──
         let cached = self.leverage_cache.get(&symbol);
-        let skip_leverage = cached.map(|c| c.0 == leverage && c.1 == leverage).unwrap_or(false);
+        let skip_leverage = cached
+            .map(|c| c.0 == leverage && c.1 == leverage)
+            .unwrap_or(false);
 
         if !skip_leverage {
-            eprintln!("[LiveTrading] Setting leverage {}x on both exchanges for {} (backgrounding)", leverage, symbol);
-            
+            eprintln!(
+                "[LiveTrading] Setting leverage {}x on both exchanges for {} (backgrounding)",
+                leverage, symbol
+            );
+
             let bin_cli = self.binance_client.clone();
             let byb_cli = self.bybit_client.clone();
             let sym = symbol.clone();
-            
+
             tokio::spawn(async move {
                 let (bin_result, byb_result) = tokio::join!(
                     bin_cli.set_leverage(&sym, leverage),
                     byb_cli.set_leverage(&sym, leverage)
                 );
                 if let Err(e) = bin_result {
-                    eprintln!("[LiveTrading] WARNING: Failed to set leverage on Binance for {}: {}", sym, e);
+                    eprintln!(
+                        "[LiveTrading] WARNING: Failed to set leverage on Binance for {}: {}",
+                        sym, e
+                    );
                 }
                 if let Err(e) = byb_result {
-                    eprintln!("[LiveTrading] WARNING: Failed to set leverage on Bybit for {}: {}", sym, e);
+                    eprintln!(
+                        "[LiveTrading] WARNING: Failed to set leverage on Bybit for {}: {}",
+                        sym, e
+                    );
                 }
             });
 
-            self.leverage_cache.insert(symbol.clone(), (leverage, leverage));
+            self.leverage_cache
+                .insert(symbol.clone(), (leverage, leverage));
         }
 
         // ── Unified fill struct for normalizing data from both exchanges ──
@@ -726,7 +892,8 @@ impl LiveTradingEngine {
         if let Some(fresh_entry) = price_store.get(coin) {
             let cur_buy_book = get_order_book(&fresh_entry, buy_exchange);
             let cur_sell_book = get_order_book(&fresh_entry, sell_exchange);
-            if let (Some(cur_ask), Some(cur_bid)) = (cur_buy_book.best_ask, cur_sell_book.best_bid) {
+            if let (Some(cur_ask), Some(cur_bid)) = (cur_buy_book.best_ask, cur_sell_book.best_bid)
+            {
                 if cur_ask <= 0.0 || cur_bid <= 0.0 || cur_ask >= cur_bid {
                     eprintln!(
                         "[{}][LiveTrading] ABORT {}: Pre-flight order book crossed or empty (ask={:.6}, bid={:.6})",
@@ -760,27 +927,44 @@ impl LiveTradingEngine {
         }
 
         // Adaptive slippage cap: Allow more slippage if the spread is wider, up to 0.35%
-        let slip_pct = if spread > 1.2 { MAX_ALLOWED_SLIPPAGE_PCT / 100.0 } else { 0.002 };
+        let slip_pct = if spread > 1.2 {
+            MAX_ALLOWED_SLIPPAGE_PCT / 100.0
+        } else {
+            0.002
+        };
         let raw_buy_price = buy_ask * (1.0 + slip_pct);
         let raw_sell_price = sell_bid * (1.0 - slip_pct);
         // Round limit prices to exchange tick size to prevent "Price not increased by tick size" errors
-        let worst_buy_price = Some(self.round_price(&symbol, buy_exchange, raw_buy_price, true).await);
-        let worst_sell_price = Some(self.round_price(&symbol, sell_exchange, raw_sell_price, false).await);
+        let worst_buy_price = Some(
+            self.round_price(&symbol, buy_exchange, raw_buy_price, true)
+                .await,
+        );
+        let worst_sell_price = Some(
+            self.round_price(&symbol, sell_exchange, raw_sell_price, false)
+                .await,
+        );
 
         let (buy_unified, sell_unified) = match (buy_exchange, sell_exchange) {
             (Exchange::Binance, Exchange::Bybit) => {
                 latency.mark_order_send();
                 let buy_fut = async {
                     let t0 = std::time::Instant::now();
-                    let res = self.binance_client.execute_order_with_fill(&symbol, "BUY",  quantity, false, worst_buy_price).await;
+                    let res = self
+                        .binance_client
+                        .execute_order_with_fill(&symbol, "BUY", quantity, false, worst_buy_price)
+                        .await;
                     (res, t0.elapsed().as_millis() as i64)
                 };
                 let sell_fut = async {
                     let t0 = std::time::Instant::now();
-                    let res = self.bybit_client.execute_order_with_fill(  &symbol, "Sell", quantity, false, worst_sell_price).await;
+                    let res = self
+                        .bybit_client
+                        .execute_order_with_fill(&symbol, "Sell", quantity, false, worst_sell_price)
+                        .await;
                     (res, t0.elapsed().as_millis() as i64)
                 };
-                let ((buy_result, buy_rtt_ms), (sell_result, sell_rtt_ms)) = tokio::join!(buy_fut, sell_fut);
+                let ((buy_result, buy_rtt_ms), (sell_result, sell_rtt_ms)) =
+                    tokio::join!(buy_fut, sell_fut);
                 latency.mark_exchange_ack();
                 latency.buy_leg_rtt_ms = Some(buy_rtt_ms);
                 latency.sell_leg_rtt_ms = Some(sell_rtt_ms);
@@ -791,7 +975,10 @@ impl LiveTradingEngine {
                     (Ok(bf), Err(e)) => {
                         // BUY filled on Binance but SELL failed on Bybit — REVERSE BUY
                         let rev_t0 = std::time::Instant::now();
-                        let rev_result = self.binance_client.execute_order_with_fill(&symbol, "SELL", bf.filled_qty, true, None).await;
+                        let rev_result = self
+                            .binance_client
+                            .execute_order_with_fill(&symbol, "SELL", bf.filled_qty, true, None)
+                            .await;
                         let rev_rtt_ms = rev_t0.elapsed().as_millis() as i64;
                         latency.reversal_rtt_ms = Some(rev_rtt_ms);
                         latency.compute_derived();
@@ -827,7 +1014,10 @@ impl LiveTradingEngine {
                     (Err(e), Ok(sf)) => {
                         // SELL filled on Bybit but BUY failed on Binance — REVERSE SELL
                         let rev_t0 = std::time::Instant::now();
-                        let rev_result = self.bybit_client.execute_order_with_fill(&symbol, "Buy", sf.filled_qty, true, None).await;
+                        let rev_result = self
+                            .bybit_client
+                            .execute_order_with_fill(&symbol, "Buy", sf.filled_qty, true, None)
+                            .await;
                         let rev_rtt_ms = rev_t0.elapsed().as_millis() as i64;
                         latency.reversal_rtt_ms = Some(rev_rtt_ms);
                         latency.compute_derived();
@@ -875,8 +1065,17 @@ impl LiveTradingEngine {
                         );
 
                         self.log_missed_with_latency(
-                            coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
-                            format!("BOTH_LEGS_FAILED: Buy err: {} ({}ms), Sell err: {} ({}ms)", e1, buy_rtt_ms, e2, sell_rtt_ms),
+                            coin,
+                            buy_exchange,
+                            sell_exchange,
+                            buy_ask,
+                            sell_bid,
+                            spread,
+                            Some(book_spread_pct),
+                            format!(
+                                "BOTH_LEGS_FAILED: Buy err: {} ({}ms), Sell err: {} ({}ms)",
+                                e1, buy_rtt_ms, e2, sell_rtt_ms
+                            ),
                             Some(latency.clone()),
                         );
                         self.emergency_halt = true;
@@ -889,15 +1088,22 @@ impl LiveTradingEngine {
                 latency.mark_order_send();
                 let buy_fut = async {
                     let t0 = std::time::Instant::now();
-                    let res = self.bybit_client.execute_order_with_fill(  &symbol, "Buy",  quantity, false, worst_buy_price).await;
+                    let res = self
+                        .bybit_client
+                        .execute_order_with_fill(&symbol, "Buy", quantity, false, worst_buy_price)
+                        .await;
                     (res, t0.elapsed().as_millis() as i64)
                 };
                 let sell_fut = async {
                     let t0 = std::time::Instant::now();
-                    let res = self.binance_client.execute_order_with_fill(&symbol, "SELL", quantity, false, worst_sell_price).await;
+                    let res = self
+                        .binance_client
+                        .execute_order_with_fill(&symbol, "SELL", quantity, false, worst_sell_price)
+                        .await;
                     (res, t0.elapsed().as_millis() as i64)
                 };
-                let ((buy_result, buy_rtt_ms), (sell_result, sell_rtt_ms)) = tokio::join!(buy_fut, sell_fut);
+                let ((buy_result, buy_rtt_ms), (sell_result, sell_rtt_ms)) =
+                    tokio::join!(buy_fut, sell_fut);
                 latency.mark_exchange_ack();
                 latency.buy_leg_rtt_ms = Some(buy_rtt_ms);
                 latency.sell_leg_rtt_ms = Some(sell_rtt_ms);
@@ -908,7 +1114,10 @@ impl LiveTradingEngine {
                     (Ok(bf), Err(e)) => {
                         // BUY filled on Bybit but SELL failed on Binance — REVERSE BUY
                         let rev_t0 = std::time::Instant::now();
-                        let rev_result = self.bybit_client.execute_order_with_fill(&symbol, "Sell", bf.filled_qty, true, None).await;
+                        let rev_result = self
+                            .bybit_client
+                            .execute_order_with_fill(&symbol, "Sell", bf.filled_qty, true, None)
+                            .await;
                         let rev_rtt_ms = rev_t0.elapsed().as_millis() as i64;
                         latency.reversal_rtt_ms = Some(rev_rtt_ms);
                         latency.compute_derived();
@@ -944,7 +1153,10 @@ impl LiveTradingEngine {
                     (Err(e), Ok(sf)) => {
                         // SELL filled on Binance but BUY failed on Bybit — REVERSE SELL
                         let rev_t0 = std::time::Instant::now();
-                        let rev_result = self.binance_client.execute_order_with_fill(&symbol, "BUY", sf.filled_qty, true, None).await;
+                        let rev_result = self
+                            .binance_client
+                            .execute_order_with_fill(&symbol, "BUY", sf.filled_qty, true, None)
+                            .await;
                         let rev_rtt_ms = rev_t0.elapsed().as_millis() as i64;
                         latency.reversal_rtt_ms = Some(rev_rtt_ms);
                         latency.compute_derived();
@@ -1003,7 +1215,10 @@ impl LiveTradingEngine {
                 }
             }
             _ => {
-                eprintln!("[LiveTrading] Unsupported exchange pair: {} -> {}", buy_exchange, sell_exchange);
+                eprintln!(
+                    "[LiveTrading] Unsupported exchange pair: {} -> {}",
+                    buy_exchange, sell_exchange
+                );
                 return false;
             }
         };
@@ -1053,7 +1268,9 @@ impl LiveTradingEngine {
                 actual_entry_spread, coin, buy_fill_price, sell_fill_price
             );
         }
-        if buy_slippage.abs() > MAX_ALLOWED_SLIPPAGE_PCT || sell_slippage.abs() > MAX_ALLOWED_SLIPPAGE_PCT {
+        if buy_slippage.abs() > MAX_ALLOWED_SLIPPAGE_PCT
+            || sell_slippage.abs() > MAX_ALLOWED_SLIPPAGE_PCT
+        {
             eprintln!(
                 "[{}][LiveTrading] ⚠️ HIGH SLIPPAGE ALERT on {}: Buy slip={:+.3}%, Sell slip={:+.3}% (threshold: {:.2}%)",
                 Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
@@ -1071,35 +1288,65 @@ impl LiveTradingEngine {
             let mismatch_pct = (final_buy_filled_qty - final_sell_filled_qty).abs()
                 / final_buy_filled_qty.max(final_sell_filled_qty)
                 * 100.0;
-            
+
             if mismatch_pct > 0.1 {
                 eprintln!(
                     "[LiveTrading] ⚠️ QTY MISMATCH on {} — BUY: {:.6}, SELL: {:.6}, diff: {:.3}%. Aligning to minimum...",
                     coin, final_buy_filled_qty, final_sell_filled_qty, mismatch_pct
                 );
-                
+
                 let min_qty = final_buy_filled_qty.min(final_sell_filled_qty);
-                
+
                 if final_buy_filled_qty > min_qty {
-                    let mut excess = Self::round_quantity(final_buy_filled_qty - min_qty, buy_fill_price);
+                    let mut excess =
+                        Self::round_quantity(final_buy_filled_qty - min_qty, buy_fill_price);
                     let mut attempts = 0;
                     while excess > 0.0 && attempts < 2 {
-                        eprintln!("[LiveTrading] ⚖️ ALIGNMENT {}/2: Selling excess {} on {}", attempts + 1, excess, buy_exchange);
+                        eprintln!(
+                            "[LiveTrading] ⚖️ ALIGNMENT {}/2: Selling excess {} on {}",
+                            attempts + 1,
+                            excess,
+                            buy_exchange
+                        );
                         let slip_pct = if attempts == 0 { 0.998 } else { 0.995 }; // 0.2% then 0.5% slippage allowance
-                        let worst_align_price = Some(buy_book.best_bid.unwrap_or(buy_fill_price) * slip_pct);
-                        
+                        let worst_align_price =
+                            Some(buy_book.best_bid.unwrap_or(buy_fill_price) * slip_pct);
+
                         let fill_res: Result<f64, String> = match buy_exchange {
-                            Exchange::Binance => self.binance_client.execute_order_with_fill(&symbol, "SELL", excess, true, worst_align_price).await.map(|f| f.filled_qty),
-                            Exchange::Bybit => self.bybit_client.execute_order_with_fill(&symbol, "Sell", excess, true, worst_align_price).await.map(|f| f.filled_qty),
+                            Exchange::Binance => self
+                                .binance_client
+                                .execute_order_with_fill(
+                                    &symbol,
+                                    "SELL",
+                                    excess,
+                                    true,
+                                    worst_align_price,
+                                )
+                                .await
+                                .map(|f| f.filled_qty),
+                            Exchange::Bybit => self
+                                .bybit_client
+                                .execute_order_with_fill(
+                                    &symbol,
+                                    "Sell",
+                                    excess,
+                                    true,
+                                    worst_align_price,
+                                )
+                                .await
+                                .map(|f| f.filled_qty),
                         };
-                        
+
                         if let Ok(align_qty) = fill_res {
                             if align_qty > 0.0 {
                                 final_buy_filled_qty -= align_qty;
-                                excess = Self::round_quantity(final_buy_filled_qty - min_qty, buy_fill_price);
+                                excess = Self::round_quantity(
+                                    final_buy_filled_qty - min_qty,
+                                    buy_fill_price,
+                                );
                             }
                         }
-                        
+
                         if excess > 0.0 && attempts == 0 {
                             eprintln!("[LiveTrading] ⚠️ ALIGNMENT 1/2 PARTIAL/FAILED. Retrying with wider limit...");
                         } else if excess > 0.0 {
@@ -1108,25 +1355,55 @@ impl LiveTradingEngine {
                         attempts += 1;
                     }
                 } else if final_sell_filled_qty > min_qty {
-                    let mut excess = Self::round_quantity(final_sell_filled_qty - min_qty, sell_fill_price);
+                    let mut excess =
+                        Self::round_quantity(final_sell_filled_qty - min_qty, sell_fill_price);
                     let mut attempts = 0;
                     while excess > 0.0 && attempts < 2 {
-                        eprintln!("[LiveTrading] ⚖️ ALIGNMENT {}/2: Buying excess {} on {}", attempts + 1, excess, sell_exchange);
+                        eprintln!(
+                            "[LiveTrading] ⚖️ ALIGNMENT {}/2: Buying excess {} on {}",
+                            attempts + 1,
+                            excess,
+                            sell_exchange
+                        );
                         let slip_pct = if attempts == 0 { 1.002 } else { 1.005 }; // 0.2% then 0.5% slippage allowance
-                        let worst_align_price = Some(sell_book.best_ask.unwrap_or(sell_fill_price) * slip_pct);
-                        
+                        let worst_align_price =
+                            Some(sell_book.best_ask.unwrap_or(sell_fill_price) * slip_pct);
+
                         let fill_res: Result<f64, String> = match sell_exchange {
-                            Exchange::Binance => self.binance_client.execute_order_with_fill(&symbol, "BUY", excess, true, worst_align_price).await.map(|f| f.filled_qty),
-                            Exchange::Bybit => self.bybit_client.execute_order_with_fill(&symbol, "Buy", excess, true, worst_align_price).await.map(|f| f.filled_qty),
+                            Exchange::Binance => self
+                                .binance_client
+                                .execute_order_with_fill(
+                                    &symbol,
+                                    "BUY",
+                                    excess,
+                                    true,
+                                    worst_align_price,
+                                )
+                                .await
+                                .map(|f| f.filled_qty),
+                            Exchange::Bybit => self
+                                .bybit_client
+                                .execute_order_with_fill(
+                                    &symbol,
+                                    "Buy",
+                                    excess,
+                                    true,
+                                    worst_align_price,
+                                )
+                                .await
+                                .map(|f| f.filled_qty),
                         };
-                        
+
                         if let Ok(align_qty) = fill_res {
                             if align_qty > 0.0 {
                                 final_sell_filled_qty -= align_qty;
-                                excess = Self::round_quantity(final_sell_filled_qty - min_qty, sell_fill_price);
+                                excess = Self::round_quantity(
+                                    final_sell_filled_qty - min_qty,
+                                    sell_fill_price,
+                                );
                             }
                         }
-                        
+
                         if excess > 0.0 && attempts == 0 {
                             eprintln!("[LiveTrading] ⚠️ ALIGNMENT 1/2 PARTIAL/FAILED. Retrying with wider limit...");
                         } else if excess > 0.0 {
@@ -1240,32 +1517,38 @@ impl LiveTradingEngine {
         };
 
         if let Err(e) = save_trade(&open_record, &self.log_path) {
-            eprintln!("[{}][LiveTrading] Failed to save OPEN trade: {}", Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"), e);
+            eprintln!(
+                "[{}][LiveTrading] Failed to save OPEN trade: {}",
+                Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                e
+            );
         }
 
         self.push_recent_trade(open_record);
 
         eprintln!(
-            "[{}][LiveTrading] OPEN #{}: {} | BUY {} @ {:.6} (id: {}) | SELL {} @ {:.6} (id: {}) | Fees: ${:.4}",
+            "[{}][LiveTrading] OPEN #{}: {} | BUY {} @ {:.6} (id: {}) | SELL {} @ {:.6} (id: {}) | Fees: ${:.4} | DynEntry: {:.3}% | Vel: {:.3}%/s",
             Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
             self.trade_count, coin,
             buy_exchange, buy_fill_price, buy_order_id,
             sell_exchange, sell_fill_price, sell_order_id,
-            total_entry_fee
+            total_entry_fee, dynamic_entry, spread_velocity
         );
 
         true
     }
 
-    /// Try to CLOSE an open position when spread <= EXIT_SPREAD_THRESHOLD.
     pub async fn try_close_position(
         &mut self,
         coin: &str,
         current_spread: f64,
+        dynamic_exit: f64,
         store: &crate::price_store::PriceStore,
     ) -> Option<TradeRecord> {
         let position = self.open_positions.get(coin)?.clone();
-        let hold_secs = Utc::now().signed_duration_since(position.open_time).num_seconds();
+        let hold_secs = Utc::now()
+            .signed_duration_since(position.open_time)
+            .num_seconds();
 
         let buy_exchange = position.buy_exchange;
         let sell_exchange = position.sell_exchange;
@@ -1273,7 +1556,8 @@ impl LiveTradingEngine {
 
         // Close EXACTLY the filled quantity on each leg.
         let close_buy_qty = Self::round_quantity(position.buy_filled_qty, position.entry_buy_price);
-        let close_sell_qty = Self::round_quantity(position.sell_filled_qty, position.entry_sell_price);
+        let close_sell_qty =
+            Self::round_quantity(position.sell_filled_qty, position.entry_sell_price);
 
         if close_buy_qty <= 0.0 || close_sell_qty <= 0.0 {
             eprintln!("[LiveTrading] CLOSING {} FAILED: close_qty rounded to <= 0.0. Manual intervention needed.", coin);
@@ -1282,19 +1566,33 @@ impl LiveTradingEngine {
 
         // Fetch current book prices to calculate close slippage relative to CURRENT market, NOT entry.
         // If we calculate relative to entry, any price movement > 0.35% will cause close orders to fail!
-        let cur_sell_ask = store.get(coin)
-            .and_then(|p| match sell_exchange { Exchange::Binance => Some(p.value().binance_book.clone()), Exchange::Bybit => Some(p.value().bybit_book.clone()) })
+        let cur_sell_ask = store
+            .get(coin)
+            .and_then(|p| match sell_exchange {
+                Exchange::Binance => Some(p.value().binance_book.clone()),
+                Exchange::Bybit => Some(p.value().bybit_book.clone()),
+            })
             .and_then(|b| b.best_ask)
             .unwrap_or(position.entry_sell_price);
-            
-        let cur_buy_bid = store.get(coin)
-            .and_then(|p| match buy_exchange { Exchange::Binance => Some(p.value().binance_book.clone()), Exchange::Bybit => Some(p.value().bybit_book.clone()) })
+
+        let cur_buy_bid = store
+            .get(coin)
+            .and_then(|p| match buy_exchange {
+                Exchange::Binance => Some(p.value().binance_book.clone()),
+                Exchange::Bybit => Some(p.value().bybit_book.clone()),
+            })
             .and_then(|b| b.best_bid)
             .unwrap_or(position.entry_buy_price);
 
         // Close slippage protection (0.50% from current market)
-        let worst_buy_close = Some(self.round_price(&symbol, sell_exchange, cur_sell_ask * 1.005, true).await);
-        let worst_sell_close = Some(self.round_price(&symbol, buy_exchange, cur_buy_bid * 0.995, false).await);
+        let worst_buy_close = Some(
+            self.round_price(&symbol, sell_exchange, cur_sell_ask * 1.005, true)
+                .await,
+        );
+        let worst_sell_close = Some(
+            self.round_price(&symbol, buy_exchange, cur_buy_bid * 0.995, false)
+                .await,
+        );
 
         eprintln!(
             "[LiveTrading] CLOSING {} | SELL on {} | BUY on {} | Held {}s | Spread: {:.4}%",
@@ -1339,8 +1637,20 @@ impl LiveTradingEngine {
         let (close_sell_unified, close_buy_unified) = match (buy_exchange, sell_exchange) {
             (Exchange::Binance, Exchange::Bybit) => {
                 let (sell_result, buy_result) = tokio::join!(
-                    self.binance_client.execute_order_with_fill(&symbol, "SELL", close_buy_qty, true, worst_sell_close),
-                    self.bybit_client.execute_order_with_fill(  &symbol, "Buy",  close_sell_qty, true, worst_buy_close)
+                    self.binance_client.execute_order_with_fill(
+                        &symbol,
+                        "SELL",
+                        close_buy_qty,
+                        true,
+                        worst_sell_close
+                    ),
+                    self.bybit_client.execute_order_with_fill(
+                        &symbol,
+                        "Buy",
+                        close_sell_qty,
+                        true,
+                        worst_buy_close
+                    )
                 );
                 match (sell_result, buy_result) {
                     (Ok(sf), Ok(bf)) => (close_from_binance(&sf), close_from_bybit(&bf)),
@@ -1350,11 +1660,26 @@ impl LiveTradingEngine {
                         eprintln!("[LiveTrading] ⚠️ PARTIAL CLOSE {}: Binance SELL filled, Bybit BUY failed: {} — retrying Bybit only", coin, first_err);
                         let mut recovered: Option<CloseFill> = None;
                         for attempt in 1..=MAX_CLOSE_RETRIES {
-                            tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
-                            eprintln!("[LiveTrading] Retry {}/{}: BUY {} on Bybit", attempt, MAX_CLOSE_RETRIES, coin);
-                            match self.bybit_client.execute_order_with_fill(&symbol, "Buy", close_sell_qty, true, None).await {
-                                Ok(bf) => { recovered = Some(close_from_bybit(&bf)); break; }
-                                Err(e) => eprintln!("[LiveTrading] Retry {} failed: {}", attempt, e),
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                300 * attempt as u64,
+                            ))
+                            .await;
+                            eprintln!(
+                                "[LiveTrading] Retry {}/{}: BUY {} on Bybit",
+                                attempt, MAX_CLOSE_RETRIES, coin
+                            );
+                            match self
+                                .bybit_client
+                                .execute_order_with_fill(&symbol, "Buy", close_sell_qty, true, None)
+                                .await
+                            {
+                                Ok(bf) => {
+                                    recovered = Some(close_from_bybit(&bf));
+                                    break;
+                                }
+                                Err(e) => {
+                                    eprintln!("[LiveTrading] Retry {} failed: {}", attempt, e)
+                                }
                             }
                         }
                         match recovered {
@@ -1374,11 +1699,26 @@ impl LiveTradingEngine {
                         eprintln!("[LiveTrading] ⚠️ PARTIAL CLOSE {}: Bybit BUY filled, Binance SELL failed: {} — retrying Binance only", coin, first_err);
                         let mut recovered: Option<CloseFill> = None;
                         for attempt in 1..=MAX_CLOSE_RETRIES {
-                            tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
-                            eprintln!("[LiveTrading] Retry {}/{}: SELL {} on Binance", attempt, MAX_CLOSE_RETRIES, coin);
-                            match self.binance_client.execute_order_with_fill(&symbol, "SELL", close_buy_qty, true, None).await {
-                                Ok(sf) => { recovered = Some(close_from_binance(&sf)); break; }
-                                Err(e) => eprintln!("[LiveTrading] Retry {} failed: {}", attempt, e),
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                300 * attempt as u64,
+                            ))
+                            .await;
+                            eprintln!(
+                                "[LiveTrading] Retry {}/{}: SELL {} on Binance",
+                                attempt, MAX_CLOSE_RETRIES, coin
+                            );
+                            match self
+                                .binance_client
+                                .execute_order_with_fill(&symbol, "SELL", close_buy_qty, true, None)
+                                .await
+                            {
+                                Ok(sf) => {
+                                    recovered = Some(close_from_binance(&sf));
+                                    break;
+                                }
+                                Err(e) => {
+                                    eprintln!("[LiveTrading] Retry {} failed: {}", attempt, e)
+                                }
                             }
                         }
                         match recovered {
@@ -1402,8 +1742,20 @@ impl LiveTradingEngine {
 
             (Exchange::Bybit, Exchange::Binance) => {
                 let (sell_result, buy_result) = tokio::join!(
-                    self.bybit_client.execute_order_with_fill(  &symbol, "Sell", close_buy_qty, true, worst_sell_close),
-                    self.binance_client.execute_order_with_fill(&symbol, "BUY",  close_sell_qty, true, worst_buy_close)
+                    self.bybit_client.execute_order_with_fill(
+                        &symbol,
+                        "Sell",
+                        close_buy_qty,
+                        true,
+                        worst_sell_close
+                    ),
+                    self.binance_client.execute_order_with_fill(
+                        &symbol,
+                        "BUY",
+                        close_sell_qty,
+                        true,
+                        worst_buy_close
+                    )
                 );
                 match (sell_result, buy_result) {
                     (Ok(sf), Ok(bf)) => (close_from_bybit(&sf), close_from_binance(&bf)),
@@ -1413,11 +1765,26 @@ impl LiveTradingEngine {
                         eprintln!("[LiveTrading] ⚠️ PARTIAL CLOSE {}: Bybit SELL filled, Binance BUY failed: {} — retrying Binance only", coin, first_err);
                         let mut recovered: Option<CloseFill> = None;
                         for attempt in 1..=MAX_CLOSE_RETRIES {
-                            tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
-                            eprintln!("[LiveTrading] Retry {}/{}: BUY {} on Binance", attempt, MAX_CLOSE_RETRIES, coin);
-                            match self.binance_client.execute_order_with_fill(&symbol, "BUY", close_sell_qty, true, None).await {
-                                Ok(bf) => { recovered = Some(close_from_binance(&bf)); break; }
-                                Err(e) => eprintln!("[LiveTrading] Retry {} failed: {}", attempt, e),
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                300 * attempt as u64,
+                            ))
+                            .await;
+                            eprintln!(
+                                "[LiveTrading] Retry {}/{}: BUY {} on Binance",
+                                attempt, MAX_CLOSE_RETRIES, coin
+                            );
+                            match self
+                                .binance_client
+                                .execute_order_with_fill(&symbol, "BUY", close_sell_qty, true, None)
+                                .await
+                            {
+                                Ok(bf) => {
+                                    recovered = Some(close_from_binance(&bf));
+                                    break;
+                                }
+                                Err(e) => {
+                                    eprintln!("[LiveTrading] Retry {} failed: {}", attempt, e)
+                                }
                             }
                         }
                         match recovered {
@@ -1436,11 +1803,26 @@ impl LiveTradingEngine {
                         eprintln!("[LiveTrading] ⚠️ PARTIAL CLOSE {}: Binance BUY filled, Bybit SELL failed: {} — retrying Bybit only", coin, first_err);
                         let mut recovered: Option<CloseFill> = None;
                         for attempt in 1..=MAX_CLOSE_RETRIES {
-                            tokio::time::sleep(std::time::Duration::from_millis(300 * attempt as u64)).await;
-                            eprintln!("[LiveTrading] Retry {}/{}: SELL {} on Bybit", attempt, MAX_CLOSE_RETRIES, coin);
-                            match self.bybit_client.execute_order_with_fill(&symbol, "Sell", close_buy_qty, true, None).await {
-                                Ok(sf) => { recovered = Some(close_from_bybit(&sf)); break; }
-                                Err(e) => eprintln!("[LiveTrading] Retry {} failed: {}", attempt, e),
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                300 * attempt as u64,
+                            ))
+                            .await;
+                            eprintln!(
+                                "[LiveTrading] Retry {}/{}: SELL {} on Bybit",
+                                attempt, MAX_CLOSE_RETRIES, coin
+                            );
+                            match self
+                                .bybit_client
+                                .execute_order_with_fill(&symbol, "Sell", close_buy_qty, true, None)
+                                .await
+                            {
+                                Ok(sf) => {
+                                    recovered = Some(close_from_bybit(&sf));
+                                    break;
+                                }
+                                Err(e) => {
+                                    eprintln!("[LiveTrading] Retry {} failed: {}", attempt, e)
+                                }
                             }
                         }
                         match recovered {
@@ -1554,17 +1936,21 @@ impl LiveTradingEngine {
 
         // Save to file
         if let Err(e) = save_trade(&record, &self.log_path) {
-            eprintln!("[{}][LiveTrading] Failed to save CLOSE trade: {}", Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"), e);
+            eprintln!(
+                "[{}][LiveTrading] Failed to save CLOSE trade: {}",
+                Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                e
+            );
         }
 
         // Keep in memory
         self.push_recent_trade(record.clone());
 
         eprintln!(
-            "[{}][LiveTrading] CLOSE #{}: {} | Held {}s | Entry: {:.4}% → Exit: {:.4}% | Gross: ${:.4} | Fees: ${:.4} | Net: ${:.4}",
+            "[{}][LiveTrading] CLOSE #{}: {} | Held {}s | Entry: {:.4}% → Exit: {:.4}% | DynExit: {:.3}% | Gross: ${:.4} | Fees: ${:.4} | Net: ${:.4}",
             Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
             self.trade_count, coin, hold_secs,
-            position.entry_spread, current_spread,
+            position.entry_spread, current_spread, dynamic_exit,
             gross_pnl, total_all_fees, net_pnl
         );
 
@@ -1601,6 +1987,8 @@ struct OpenCandidate {
     buy_price: f64,
     sell_price: f64,
     spread: f64,
+    dynamic_entry: f64,
+    spread_velocity: f64,
     /// Latency profiler pre-populated with book_update_ms and detected_ms at scan time.
     latency: TradeLatency,
 }
@@ -1614,11 +2002,19 @@ pub async fn run_trading_loop(
     engine: SharedTradingEngine,
     funding_store: FundingStore,
 ) {
-    use crate::price_store::{compute_spread_from_fresh, fresh_prices};
+    use crate::price_store::fresh_prices;
     use std::sync::atomic::Ordering;
 
     // Reduced from 100ms to 2ms for near-instant reaction to spreads (<5ms latency target)
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(2));
+
+    // Dynamic Spread-Threshold Config and Stats Maps
+    let dynamic_config = crate::config::DynamicSpreadConfig::default();
+    let startup_time_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let mut stats_dir_a: std::collections::HashMap<String, crate::stats::RollingStats> =
+        std::collections::HashMap::new();
+    let mut stats_dir_b: std::collections::HashMap<String, crate::stats::RollingStats> =
+        std::collections::HashMap::new();
 
     // Keep HTTP connection pool warm by pinging REST endpoints every 10 seconds
     let engine_for_keepalive = engine.clone();
@@ -1630,7 +2026,6 @@ pub async fn run_trading_loop(
             eng.ping_keepalives().await;
         }
     });
-
 
     // Refresh balances on startup
     {
@@ -1656,52 +2051,7 @@ pub async fn run_trading_loop(
         let bin_e = status.binance_enabled.load(Ordering::Relaxed);
         let byb_e = status.bybit_enabled.load(Ordering::Relaxed);
 
-        // If trading is disabled, log opportunities above threshold as TRADING_PAUSED
-        if !trading_on {
-            for entry in store.iter() {
-                let coin = entry.key().clone();
-                let prices = entry.value().clone();
-                let (bin_p, byb_p) = fresh_prices(&prices);
-                let bin_f = if bin_e { bin_p } else { None };
-                let byb_f = if byb_e { byb_p } else { None };
-                let spread = compute_spread_from_fresh(bin_f, byb_f);
-                if let Some(s) = spread {
-                    if s >= ENTRY_SPREAD_THRESHOLD {
-                        let (buy_ex, sell_ex, buy_price_val, sell_price_val) = match (bin_f, byb_f) {
-                            (Some(bp), Some(sp)) => {
-                                if bp < sp {
-                                    (Exchange::Binance, Exchange::Bybit, bp, sp)
-                                } else {
-                                    (Exchange::Bybit, Exchange::Binance, sp, bp)
-                                }
-                            }
-                            _ => continue,
-                        };
-                        let reason = if s > MAX_SPREAD_THRESHOLD {
-                            format!("SPREAD_EXCEEDS_MAX_SANITY: Spread {:.2}% exceeds max sanity cap of {:.2}%", s, MAX_SPREAD_THRESHOLD)
-                        } else {
-                            "TRADING_PAUSED: Trading is disabled in TUI (press T to enable)".to_string()
-                        };
-                        crate::missed_trade_logger::log_missed_trade(&crate::missed_trade_logger::MissedTradeRecord {
-                            timestamp: Utc::now(),
-                            coin,
-                            spread_pct: s,
-                            threshold_pct: ENTRY_SPREAD_THRESHOLD,
-                            buy_exchange: buy_ex,
-                            sell_exchange: sell_ex,
-                            buy_price: buy_price_val,
-                            sell_price: sell_price_val,
-                            book_spread_pct: None,
-                            reason,
-                            binance_balance: 0.0,
-                            bybit_balance: 0.0,
-                            latency: None,
-                        });
-                    }
-                }
-            }
-            continue;
-        }
+
 
         // Refresh balances every ~60 seconds (600 iterations * 100ms)
         if loop_count % 600 == 0 {
@@ -1712,13 +2062,14 @@ pub async fn run_trading_loop(
         // ── Pass 1: Collect open positions info outside the lock, then process closes ──
         let open_coins: Vec<(String, Exchange, Exchange)> = {
             let eng = engine.lock().await;
-            eng.open_positions.iter()
+            eng.open_positions
+                .iter()
                 .map(|(coin, pos)| (coin.clone(), pos.buy_exchange, pos.sell_exchange))
                 .collect()
         };
 
         // Collect close candidates
-        let mut close_candidates: Vec<(String, f64)> = Vec::new();
+        let mut close_candidates: Vec<(String, f64, f64)> = Vec::new();
         let mut force_close_candidates: Vec<String> = Vec::new();
 
         for (coin, buy_ex, sell_ex) in &open_coins {
@@ -1747,19 +2098,111 @@ pub async fn run_trading_loop(
             };
 
             if let Some(pos) = pos_opt {
-                let hold_secs = Utc::now().signed_duration_since(pos.open_time).num_seconds();
+                let hold_secs = Utc::now()
+                    .signed_duration_since(pos.open_time)
+                    .num_seconds();
 
                 if let (Some(bp), Some(sp)) = (buy_ex_price, sell_ex_price) {
                     if bp > 0.0 && sp > 0.0 {
+                        // Original exit spread calculation for the position
                         let current_spread = ((sp - bp) / bp) * 100.0;
-                        
-                        // Instant close conditions:
-                        // 1. Spread converged to exit threshold (<= EXIT_SPREAD_THRESHOLD)
-                        // 2. OR Max hold time exceeded (only if MAX_HOLD_SECS > 0)
-                        let target_close = EXIT_SPREAD_THRESHOLD;
-                        let timeout_exceeded = MAX_HOLD_SECS > 0 && hold_secs >= MAX_HOLD_SECS;
-                        if current_spread <= target_close || timeout_exceeded {
-                            close_candidates.push((coin.clone(), current_spread));
+
+                        // Dynamic Exit Phase 6
+                        let current_time_ms = chrono::Utc::now().timestamp_millis() as u64;
+                        let open_time_ms = pos.open_time.timestamp_millis() as u64;
+
+                        let bin_ask = match prices.binance_book.best_ask {
+                            Some(a) if a > 0.0 => a,
+                            _ => continue,
+                        };
+                        let bin_bid = match prices.binance_book.best_bid {
+                            Some(b) if b > 0.0 => b,
+                            _ => continue,
+                        };
+                        let byb_ask = match prices.bybit_book.best_ask {
+                            Some(a) if a > 0.0 => a,
+                            _ => continue,
+                        };
+                        let byb_bid = match prices.bybit_book.best_bid {
+                            Some(b) if b > 0.0 => b,
+                            _ => continue,
+                        };
+
+                        let bin_asks = [crate::stats::OrderBookLevel {
+                            price: bin_ask,
+                            qty: prices.binance_book.best_ask_qty.unwrap_or(0.0),
+                        }];
+                        let bin_bids = [crate::stats::OrderBookLevel {
+                            price: bin_bid,
+                            qty: prices.binance_book.best_bid_qty.unwrap_or(0.0),
+                        }];
+                        let byb_asks = [crate::stats::OrderBookLevel {
+                            price: byb_ask,
+                            qty: prices.bybit_book.best_ask_qty.unwrap_or(0.0),
+                        }];
+                        let byb_bids = [crate::stats::OrderBookLevel {
+                            price: byb_bid,
+                            qty: prices.bybit_book.best_bid_qty.unwrap_or(0.0),
+                        }];
+
+                        let (should_close, dynamic_exit) = if *buy_ex == Exchange::Binance {
+                            // Opened on Dir A (Bought Binance, Sold Bybit)
+                            // Exit path uses Dir A stats: compute effective spread (sell Binance, buy Bybit)
+                            let target_qty = TRADE_SIZE_USDT / bin_bid; // roughly base quantity
+                            if let Ok(exit_spread) = crate::stats::compute_effective_spread(
+                                &bin_bids,
+                                &byb_asks,
+                                target_qty,
+                                dynamic_config.max_depth_levels,
+                                dynamic_config.max_slippage_pct,
+                            ) {
+                                if let Some(stats_a) = stats_dir_a.get_mut(coin) {
+                                    (
+                                        stats_a.evaluate_exit(
+                                            exit_spread,
+                                            current_time_ms,
+                                            open_time_ms,
+                                        ),
+                                        stats_a.get_exit_threshold(current_time_ms).unwrap_or(0.0),
+                                    )
+                                } else {
+                                    (false, 0.0)
+                                }
+                            } else {
+                                (false, 0.0)
+                            }
+                        } else {
+                            // Opened on Dir B (Bought Bybit, Sold Binance)
+                            // Exit path uses Dir B stats: compute effective spread (sell Bybit, buy Binance)
+                            let target_qty = TRADE_SIZE_USDT / byb_bid;
+                            if let Ok(exit_spread) = crate::stats::compute_effective_spread(
+                                &byb_bids,
+                                &bin_asks,
+                                target_qty,
+                                dynamic_config.max_depth_levels,
+                                dynamic_config.max_slippage_pct,
+                            ) {
+                                if let Some(stats_b) = stats_dir_b.get_mut(coin) {
+                                    (
+                                        stats_b.evaluate_exit(
+                                            exit_spread,
+                                            current_time_ms,
+                                            open_time_ms,
+                                        ),
+                                        stats_b.get_exit_threshold(current_time_ms).unwrap_or(0.0),
+                                    )
+                                } else {
+                                    (false, 0.0)
+                                }
+                            } else {
+                                (false, 0.0)
+                            }
+                        };
+
+                        if should_close {
+                            close_candidates.push((coin.clone(), current_spread, dynamic_exit));
+                            let timeout_exceeded = hold_secs
+                                >= (dynamic_config.max_arbitrage_hold_time_ms as i64 / 1000);
                             if timeout_exceeded {
                                 eprintln!("[LiveTrading] MAX HOLD EXCEEDED: {} held for {}s (spread {:.3}%)", coin, hold_secs, current_spread);
                             }
@@ -1779,16 +2222,22 @@ pub async fn run_trading_loop(
         // Execute closes (single lock acquisition for all close operations)
         if !close_candidates.is_empty() || !force_close_candidates.is_empty() {
             let mut eng = engine.lock().await;
-            for (coin, spread) in &close_candidates {
-                eng.try_close_position(coin, *spread, &store).await;
+            for (coin, spread, dynamic_exit) in &close_candidates {
+                eng.try_close_position(coin, *spread, *dynamic_exit, &store)
+                    .await;
             }
             for coin in &force_close_candidates {
                 if eng.open_positions.contains_key(coin.as_str()) {
                     if let Some(pos) = eng.open_positions.get(coin.as_str()).cloned() {
-                        let hold_secs = Utc::now().signed_duration_since(pos.open_time).num_seconds();
+                        let hold_secs = Utc::now()
+                            .signed_duration_since(pos.open_time)
+                            .num_seconds();
                         if hold_secs >= 10 {
-                            eprintln!("[LiveTrading] FUNDING PAUSE: Force closing {} position", coin);
-                            eng.try_close_position(coin, -999.0, &store).await;
+                            eprintln!(
+                                "[LiveTrading] FUNDING PAUSE: Force closing {} position",
+                                coin
+                            );
+                            eng.try_close_position(coin, -999.0, 0.0, &store).await;
                         }
                     }
                 }
@@ -1807,32 +2256,207 @@ pub async fn run_trading_loop(
             }
 
             // Freshness check for order books on both exchanges
-            let bin_fresh = prices.binance_book_updated.map(|ts| ts.elapsed().as_millis() <= MAX_BOOK_AGE_MILLIS).unwrap_or(false);
-            let byb_fresh = prices.bybit_book_updated.map(|ts| ts.elapsed().as_millis() <= MAX_BOOK_AGE_MILLIS).unwrap_or(false);
+            let bin_fresh = prices
+                .binance_book_updated
+                .map(|ts| ts.elapsed().as_millis() <= MAX_BOOK_AGE_MILLIS)
+                .unwrap_or(false);
+            let byb_fresh = prices
+                .bybit_book_updated
+                .map(|ts| ts.elapsed().as_millis() <= MAX_BOOK_AGE_MILLIS)
+                .unwrap_or(false);
             if !bin_fresh || !byb_fresh {
                 continue;
             }
 
-            let bin_ask = match prices.binance_book.best_ask { Some(a) if a > 0.0 => a, _ => continue };
-            let bin_bid = match prices.binance_book.best_bid { Some(b) if b > 0.0 => b, _ => continue };
-            let byb_ask = match prices.bybit_book.best_ask { Some(a) if a > 0.0 => a, _ => continue };
-            let byb_bid = match prices.bybit_book.best_bid { Some(b) if b > 0.0 => b, _ => continue };
-
-            // Real executable book spread in both directions
-            // Direction 1: Buy Binance (at bin_ask), Sell Bybit (at byb_bid)
-            let spread_bin_byb = ((byb_bid - bin_ask) / bin_ask) * 100.0;
-            // Direction 2: Buy Bybit (at byb_ask), Sell Binance (at bin_bid)
-            let spread_byb_bin = ((bin_bid - byb_ask) / byb_ask) * 100.0;
-
-            let candidate_opt = if spread_bin_byb >= ENTRY_SPREAD_THRESHOLD && spread_bin_byb <= MAX_SPREAD_THRESHOLD {
-                Some((Exchange::Binance, Exchange::Bybit, bin_ask, byb_bid, spread_bin_byb))
-            } else if spread_byb_bin >= ENTRY_SPREAD_THRESHOLD && spread_byb_bin <= MAX_SPREAD_THRESHOLD {
-                Some((Exchange::Bybit, Exchange::Binance, byb_ask, bin_bid, spread_byb_bin))
-            } else {
-                None
+            let bin_ask = match prices.binance_book.best_ask {
+                Some(a) if a > 0.0 => a,
+                _ => continue,
+            };
+            let bin_bid = match prices.binance_book.best_bid {
+                Some(b) if b > 0.0 => b,
+                _ => continue,
+            };
+            let byb_ask = match prices.bybit_book.best_ask {
+                Some(a) if a > 0.0 => a,
+                _ => continue,
+            };
+            let byb_bid = match prices.bybit_book.best_bid {
+                Some(b) if b > 0.0 => b,
+                _ => continue,
             };
 
-            if let Some((buy_ex, sell_ex, buy_price_val, sell_price_val, s)) = candidate_opt {
+            // Dynamic Threshold & Stats Engine Path (Phase 5)
+            let current_time_ms = chrono::Utc::now().timestamp_millis() as u64;
+
+            let bin_ask_qty = prices.binance_book.best_ask_qty.unwrap_or(0.0);
+            let bin_bid_qty = prices.binance_book.best_bid_qty.unwrap_or(0.0);
+            let byb_ask_qty = prices.bybit_book.best_ask_qty.unwrap_or(0.0);
+            let byb_bid_qty = prices.bybit_book.best_bid_qty.unwrap_or(0.0);
+
+            let bin_asks = [crate::stats::OrderBookLevel {
+                price: bin_ask,
+                qty: bin_ask_qty,
+            }];
+            let bin_bids = [crate::stats::OrderBookLevel {
+                price: bin_bid,
+                qty: bin_bid_qty,
+            }];
+            let byb_asks = [crate::stats::OrderBookLevel {
+                price: byb_ask,
+                qty: byb_ask_qty,
+            }];
+            let byb_bids = [crate::stats::OrderBookLevel {
+                price: byb_bid,
+                qty: byb_bid_qty,
+            }];
+
+            // Direction A: Buy Binance, Sell Bybit
+            let target_qty_a = TRADE_SIZE_USDT / bin_ask;
+            let mut candidate_opt = None;
+            let mut reject_a = None;
+            let mut eff_spread_a = 0.0;
+
+            let stats_a = stats_dir_a.entry(coin.clone()).or_insert_with(|| {
+                crate::stats::RollingStats::new(dynamic_config.clone(), startup_time_ms)
+            });
+
+            match crate::stats::compute_effective_spread(
+                &bin_asks,
+                &byb_bids,
+                target_qty_a,
+                dynamic_config.max_depth_levels,
+                dynamic_config.max_slippage_pct,
+            ) {
+                Ok(effective_spread_a) => {
+                    eff_spread_a = effective_spread_a;
+                    stats_a.update(effective_spread_a, current_time_ms);
+                    
+                    if effective_spread_a <= MAX_SPREAD_THRESHOLD {
+                        if let Err(e) = stats_a.evaluate_entry(effective_spread_a, current_time_ms) {
+                            reject_a = Some(e);
+                        } else {
+                            candidate_opt = Some((
+                                Exchange::Binance,
+                                Exchange::Bybit,
+                                bin_ask,
+                                byb_bid,
+                                effective_spread_a,
+                                stats_a.get_entry_threshold(current_time_ms).unwrap_or(0.0),
+                                stats_a.spread_velocity,
+                            ));
+                        }
+                    } else {
+                        reject_a = Some(crate::rejection::RejectionReason::RISK_LIMIT);
+                    }
+                }
+                Err(_) => {
+                    reject_a = Some(crate::rejection::RejectionReason::INSUFFICIENT_LIQUIDITY);
+                }
+            }
+
+            crate::opportunity_logger::log_opportunity(&crate::opportunity_logger::OpportunityRecord {
+                timestamp: chrono::Utc::now(),
+                symbol: coin.clone(),
+                direction: "Binance->Bybit".to_string(),
+                raw_bid: bin_bid,
+                raw_ask: bin_ask,
+                effective_buy_price: bin_ask,
+                effective_sell_price: byb_bid,
+                gross_spread_pct: ((byb_bid - bin_ask) / bin_ask) * 100.0,
+                effective_spread_pct: eff_spread_a,
+                baseline_spread_pct: stats_a.rolling_median,
+                spread_volatility_pct: stats_a.get_spread_volatility(),
+                dynamic_entry_threshold_pct: stats_a.get_entry_threshold(current_time_ms).unwrap_or(0.0),
+                dynamic_exit_threshold_pct: stats_a.get_exit_threshold(current_time_ms).unwrap_or(0.0),
+                z_score: if stats_a.get_spread_volatility() > 0.0 { (eff_spread_a - stats_a.rolling_median) / stats_a.get_spread_volatility() } else { 0.0 },
+                spread_velocity: stats_a.spread_velocity,
+                expected_slippage_pct: 0.0,
+                buy_fee_pct: 0.0,
+                sell_fee_pct: 0.0,
+                net_edge_pct: eff_spread_a,
+                signal_age_ms: 0,
+                liquidity_ok: reject_a != Some(crate::rejection::RejectionReason::INSUFFICIENT_LIQUIDITY),
+                data_fresh_ok: bin_fresh && byb_fresh,
+                entry_decision: candidate_opt.is_some(),
+                reject_reason: reject_a.clone(),
+                exit_trigger_condition: None,
+            });
+
+            // Direction B: Buy Bybit, Sell Binance
+            if candidate_opt.is_none() {
+                let target_qty_b = TRADE_SIZE_USDT / byb_ask;
+                let mut reject_b = None;
+                let mut eff_spread_b = 0.0;
+                let stats_b = stats_dir_b.entry(coin.clone()).or_insert_with(|| {
+                    crate::stats::RollingStats::new(dynamic_config.clone(), startup_time_ms)
+                });
+
+                match crate::stats::compute_effective_spread(
+                    &byb_asks,
+                    &bin_bids,
+                    target_qty_b,
+                    dynamic_config.max_depth_levels,
+                    dynamic_config.max_slippage_pct,
+                ) {
+                    Ok(effective_spread_b) => {
+                        eff_spread_b = effective_spread_b;
+                        stats_b.update(effective_spread_b, current_time_ms);
+                        
+                        if effective_spread_b <= MAX_SPREAD_THRESHOLD {
+                            if let Err(e) = stats_b.evaluate_entry(effective_spread_b, current_time_ms) {
+                                reject_b = Some(e);
+                            } else {
+                                candidate_opt = Some((
+                                    Exchange::Bybit,
+                                    Exchange::Binance,
+                                    byb_ask,
+                                    bin_bid,
+                                    effective_spread_b,
+                                    stats_b.get_entry_threshold(current_time_ms).unwrap_or(0.0),
+                                    stats_b.spread_velocity,
+                                ));
+                            }
+                        } else {
+                            reject_b = Some(crate::rejection::RejectionReason::RISK_LIMIT);
+                        }
+                    }
+                    Err(_) => {
+                        reject_b = Some(crate::rejection::RejectionReason::INSUFFICIENT_LIQUIDITY);
+                    }
+                }
+
+                crate::opportunity_logger::log_opportunity(&crate::opportunity_logger::OpportunityRecord {
+                    timestamp: chrono::Utc::now(),
+                    symbol: coin.clone(),
+                    direction: "Bybit->Binance".to_string(),
+                    raw_bid: byb_bid,
+                    raw_ask: byb_ask,
+                    effective_buy_price: byb_ask,
+                    effective_sell_price: bin_bid,
+                    gross_spread_pct: ((bin_bid - byb_ask) / byb_ask) * 100.0,
+                    effective_spread_pct: eff_spread_b,
+                    baseline_spread_pct: stats_b.rolling_median,
+                    spread_volatility_pct: stats_b.get_spread_volatility(),
+                    dynamic_entry_threshold_pct: stats_b.get_entry_threshold(current_time_ms).unwrap_or(0.0),
+                    dynamic_exit_threshold_pct: stats_b.get_exit_threshold(current_time_ms).unwrap_or(0.0),
+                    z_score: if stats_b.get_spread_volatility() > 0.0 { (eff_spread_b - stats_b.rolling_median) / stats_b.get_spread_volatility() } else { 0.0 },
+                    spread_velocity: stats_b.spread_velocity,
+                    expected_slippage_pct: 0.0,
+                    buy_fee_pct: 0.0,
+                    sell_fee_pct: 0.0,
+                    net_edge_pct: eff_spread_b,
+                    signal_age_ms: 0,
+                    liquidity_ok: reject_b != Some(crate::rejection::RejectionReason::INSUFFICIENT_LIQUIDITY),
+                    data_fresh_ok: bin_fresh && byb_fresh,
+                    entry_decision: candidate_opt.is_some(),
+                    reject_reason: reject_b.clone(),
+                    exit_trigger_condition: None,
+                });
+            }
+
+            if let Some((buy_ex, sell_ex, buy_price_val, sell_price_val, s, dyn_entry, vel)) =
+                candidate_opt
+            {
                 let buy_book = get_order_book(&prices, buy_ex).clone();
                 let sell_book = get_order_book(&prices, sell_ex).clone();
 
@@ -1853,6 +2477,8 @@ pub async fn run_trading_loop(
                     buy_price: buy_price_val,
                     sell_price: sell_price_val,
                     spread: s,
+                    dynamic_entry: dyn_entry,
+                    spread_velocity: vel,
                     latency: lat,
                 });
             }
@@ -1861,7 +2487,11 @@ pub async fn run_trading_loop(
         // Execute opens (single lock acquisition for all open candidates)
         if !open_candidates.is_empty() {
             // Sort by spread descending — prioritize the best opportunity
-            open_candidates.sort_by(|a, b| b.spread.partial_cmp(&a.spread).unwrap_or(std::cmp::Ordering::Equal));
+            open_candidates.sort_by(|a, b| {
+                b.spread
+                    .partial_cmp(&a.spread)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
             let mut eng = engine.lock().await;
             for candidate in &open_candidates {
@@ -1876,14 +2506,15 @@ pub async fn run_trading_loop(
                         candidate.sell_price,
                         candidate.spread,
                         None,
-                        format!("SESSION_LIMIT_REACHED: Session limit of {} trades reached ({}/{})", cur_limit, cur_taken, cur_limit),
+                        format!(
+                            "SESSION_LIMIT_REACHED: Session limit of {} trades reached ({}/{})",
+                            cur_limit, cur_taken, cur_limit
+                        ),
                     );
                     continue;
                 }
 
-                // Stop if max concurrent positions reached
-                if eng.open_positions.len() >= MAX_OPEN_POSITIONS {
-                    let holding = eng.open_positions.keys().cloned().collect::<Vec<_>>().join(", ");
+                if !trading_on {
                     eng.log_missed(
                         &candidate.coin,
                         candidate.buy_ex,
@@ -1892,24 +2523,54 @@ pub async fn run_trading_loop(
                         candidate.sell_price,
                         candidate.spread,
                         None,
-                        format!("MAX_POSITIONS_REACHED: Currently {}/{} open positions (holding: {})", eng.open_positions.len(), MAX_OPEN_POSITIONS, holding),
+                        "TRADING_PAUSED: Trading is disabled in TUI (press T to enable)".to_string(),
                     );
                     continue;
                 }
 
-                let opened = eng.try_open_position(
-                    &candidate.coin,
-                    candidate.buy_ex,
-                    candidate.sell_ex,
-                    &candidate.buy_book,
-                    &candidate.sell_book,
-                    candidate.buy_price,
-                    candidate.sell_price,
-                    candidate.spread,
-                    &funding_store,
-                    &store,
-                    candidate.latency.clone(),
-                ).await;
+                // Stop if max concurrent positions reached
+                if eng.open_positions.len() >= MAX_OPEN_POSITIONS {
+                    let holding = eng
+                        .open_positions
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    eng.log_missed(
+                        &candidate.coin,
+                        candidate.buy_ex,
+                        candidate.sell_ex,
+                        candidate.buy_price,
+                        candidate.sell_price,
+                        candidate.spread,
+                        None,
+                        format!(
+                            "MAX_POSITIONS_REACHED: Currently {}/{} open positions (holding: {})",
+                            eng.open_positions.len(),
+                            MAX_OPEN_POSITIONS,
+                            holding
+                        ),
+                    );
+                    continue;
+                }
+
+                let opened = eng
+                    .try_open_position(
+                        &candidate.coin,
+                        candidate.buy_ex,
+                        candidate.sell_ex,
+                        &candidate.buy_book,
+                        &candidate.sell_book,
+                        candidate.buy_price,
+                        candidate.sell_price,
+                        candidate.spread,
+                        candidate.dynamic_entry,
+                        candidate.spread_velocity,
+                        &funding_store,
+                        &store,
+                        candidate.latency.clone(),
+                    )
+                    .await;
 
                 if opened {
                     let new_taken = status.session_trades_taken.fetch_add(1, Ordering::Relaxed) + 1;
