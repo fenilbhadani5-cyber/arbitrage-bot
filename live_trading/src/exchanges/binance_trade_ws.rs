@@ -304,30 +304,17 @@ impl BinanceTradeWs {
         let ts = Self::timestamp_ms();
         let reduce_only_str = if reduce_only { "true" } else { "false" };
 
-        // Build the query string for signature computation (same format as REST).
-        // Binance WS API signs the alphabetically-sorted params as a query string.
-        let (order_type, tif) = if price.is_some() {
-            ("LIMIT", "IOC")
-        } else {
-            ("MARKET", "GTC")
-        };
+        let order_type = "MARKET";
 
-        let query = if let Some(p) = price {
-            format!(
-                "apiKey={}&newClientOrderId={}&price={:.6}&quantity={:.8}&reduceOnly={}&side={}&symbol={}&timeInForce={}&timestamp={}&type={}",
-                self.api_key, client_order_id, p, quantity, reduce_only_str, side, symbol, tif, ts, order_type
-            )
-        } else {
-            format!(
-                "apiKey={}&newClientOrderId={}&quantity={:.8}&reduceOnly={}&side={}&symbol={}&timestamp={}&type={}",
-                self.api_key, client_order_id, quantity, reduce_only_str, side, symbol, ts, order_type
-            )
-        };
+        let query = format!(
+            "apiKey={}&newClientOrderId={}&quantity={:.8}&reduceOnly={}&side={}&symbol={}&timestamp={}&type={}",
+            self.api_key, client_order_id, quantity, reduce_only_str, side, symbol, ts, order_type
+        );
 
         let signature = self.sign(&query);
 
         // Build the WS API request frame
-        let mut params = serde_json::json!({
+        let params = serde_json::json!({
             "apiKey": self.api_key,
             "symbol": symbol,
             "side": side,
@@ -338,11 +325,6 @@ impl BinanceTradeWs {
             "timestamp": ts,
             "signature": signature,
         });
-
-        if let Some(p) = price {
-            params["timeInForce"] = serde_json::json!(tif);
-            params["price"] = serde_json::json!(format!("{:.6}", p));
-        }
 
         let frame = serde_json::json!({
             "id": req_id,
@@ -356,17 +338,10 @@ impl BinanceTradeWs {
         let (tx, rx) = oneshot::channel::<Result<serde_json::Value, String>>();
         self.pending.insert(req_id.clone(), tx);
 
-        if let Some(p) = price {
-            eprintln!(
-                "[BinanceTradeWS] Sending {} {} {} @ LIMIT IOC {:.6} (reqId={}, clientId={})",
-                side, quantity, symbol, p, req_id, client_order_id
-            );
-        } else {
-            eprintln!(
-                "[BinanceTradeWS] Sending {} {} {} @ MARKET (reqId={}, clientId={})",
-                side, quantity, symbol, req_id, client_order_id
-            );
-        }
+        eprintln!(
+            "[BinanceTradeWS] Sending {} {} {} @ MARKET (reqId={}, clientId={})",
+            side, quantity, symbol, req_id, client_order_id
+        );
 
         // Send the frame
         {

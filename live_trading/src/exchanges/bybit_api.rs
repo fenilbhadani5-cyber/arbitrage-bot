@@ -334,32 +334,20 @@ impl BybitClient {
             "category": "linear",
             "symbol": symbol,
             "side": side,
-            "orderType": if price.is_some() { "Limit" } else { "Market" },
+            "orderType": "Market",
             "qty": format!("{:.8}", quantity),
-            "timeInForce": "IOC",
             "orderLinkId": order_link_id,
             "reduceOnly": reduce_only,
         });
-
-        if let Some(p) = price {
-            body["price"] = serde_json::json!(format!("{:.6}", p));
-        }
 
         let body_str = body.to_string();
         let signature = self.sign(ts, &body_str);
         let url = format!("{}/v5/order/create", self.base_url);
 
-        if let Some(p) = price {
-            eprintln!(
-                "[BybitAPI] Placing {} {} {} @ LIMIT IOC {:.6} (linkId={})",
-                side, quantity, symbol, p, order_link_id
-            );
-        } else {
-            eprintln!(
-                "[BybitAPI] Placing {} {} {} @ MARKET (linkId={})",
-                side, quantity, symbol, order_link_id
-            );
-        }
+        eprintln!(
+            "[BybitAPI] Placing {} {} {} @ MARKET (linkId={})",
+            side, quantity, symbol, order_link_id
+        );
 
         let mut req = self
             .http_fast

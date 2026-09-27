@@ -326,49 +326,26 @@ impl BinanceClient {
 
         let ts = Self::timestamp_ms();
         let reduce_only_str = if reduce_only { "true" } else { "false" };
-        // IOC (Immediate-or-Cancel): fills as much quantity as possible immediately at or better than `price`,
-        // and cancels any remaining unfilled quantity.
-        // MARKET type is used when no price limit is given.
-        // MARKET type is used when no price limit is given.
-        let query = if let Some(p) = price {
-            format!(
-                "symbol={}&side={}&type=LIMIT&timeInForce=IOC&quantity={:.8}&price={:.6}&newClientOrderId={}&reduceOnly={}&timestamp={}",
-                symbol, side, quantity, p, client_order_id, reduce_only_str, ts
-            )
-        } else {
-            format!(
-                "symbol={}&side={}&type=MARKET&quantity={:.8}&newClientOrderId={}&reduceOnly={}&timestamp={}",
-                symbol, side, quantity, client_order_id, reduce_only_str, ts
-            )
-        };
+        // MARKET type is used for guaranteed execution.
+        let query = format!(
+            "symbol={}&side={}&type=MARKET&quantity={:.8}&newClientOrderId={}&reduceOnly={}&timestamp={}",
+            symbol, side, quantity, client_order_id, reduce_only_str, ts
+        );
         let signature = self.sign(&query);
         let url = format!(
             "{}/fapi/v1/order?{}&signature={}",
             self.base_url, query, signature
         );
 
-        if let Some(p) = price {
-            eprintln!(
-                "[{}][BinanceAPI] Placing {} {} {} @ LIMIT IOC {:.6} (clientId={}, count={}/300)",
-                Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-                side,
-                quantity,
-                symbol,
-                p,
-                client_order_id,
-                current_count
-            );
-        } else {
-            eprintln!(
-                "[{}][BinanceAPI] Placing {} {} {} @ MARKET (clientId={}, count={}/300)",
-                Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-                side,
-                quantity,
-                symbol,
-                client_order_id,
-                current_count
-            );
-        }
+        eprintln!(
+            "[{}][BinanceAPI] Placing {} {} {} @ MARKET (clientId={}, count={}/300)",
+            Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            side,
+            quantity,
+            symbol,
+            client_order_id,
+            current_count
+        );
 
         let resp = self
             .http_fast
