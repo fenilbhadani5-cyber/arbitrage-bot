@@ -17,7 +17,10 @@ pub struct MissedTradeRecord {
     pub timestamp: DateTime<Utc>,
     pub coin: String,
     pub spread_pct: f64,
-    pub threshold_pct: f64,
+    pub dynamic_entry_pct: f64,
+    pub dynamic_exit_pct: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spread_velocity: Option<f64>,
     pub buy_exchange: Exchange,
     pub sell_exchange: Exchange,
     pub buy_price: f64,
@@ -163,11 +166,12 @@ pub fn log_missed_trade(record: &MissedTradeRecord) {
 
     // 1. Human-readable text log format
     let text_line = format!(
-        "[{}] MISSED | COIN: {:<8} | Spread: {:>6.3}% (Min: {:.2}%) | BUY: {:<7} @ {:<10.6} | SELL: {:<7} @ {:<10.6} | BookSpread: {:>6} | REASON: {} | Balances: Binance=${:.2}, Bybit=${:.2}{}\n",
+        "[{}] MISSED | COIN: {:<8} | Spread: {:>6.3}% (MinEntry: {:.2}%, MinExit: {:.2}%) | BUY: {:<7} @ {:<10.6} | SELL: {:<7} @ {:<10.6} | BookSpread: {:>6} | REASON: {} | Balances: Binance=${:.2}, Bybit=${:.2}{}\n",
         time_str,
         record.coin,
         record.spread_pct,
-        record.threshold_pct,
+        record.dynamic_entry_pct,
+        record.dynamic_exit_pct,
         record.buy_exchange.to_string(),
         record.buy_price,
         record.sell_exchange.to_string(),
@@ -219,7 +223,9 @@ mod tests {
             timestamp: Utc::now(),
             coin: "FORM".to_string(),
             spread_pct: 1.45,
-            threshold_pct: 1.3,
+            dynamic_entry_pct: 1.3,
+            dynamic_exit_pct: 0.3,
+            spread_velocity: Some(0.12),
             buy_exchange: Exchange::Binance,
             sell_exchange: Exchange::Bybit,
             buy_price: 0.3059,

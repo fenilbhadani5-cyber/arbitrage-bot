@@ -267,6 +267,9 @@ impl LiveTradingEngine {
         buy_price: f64,
         sell_price: f64,
         spread: f64,
+        dynamic_entry: f64,
+        dynamic_exit: f64,
+        spread_velocity: f64,
         book_spread: Option<f64>,
         reason: String,
     ) {
@@ -277,6 +280,9 @@ impl LiveTradingEngine {
             buy_price,
             sell_price,
             spread,
+            dynamic_entry,
+            dynamic_exit,
+            spread_velocity,
             book_spread,
             reason,
             None,
@@ -292,6 +298,9 @@ impl LiveTradingEngine {
         buy_price: f64,
         sell_price: f64,
         spread: f64,
+        dynamic_entry: f64,
+        dynamic_exit: f64,
+        spread_velocity: f64,
         book_spread: Option<f64>,
         reason: String,
         latency: Option<crate::latency::TradeLatency>,
@@ -301,7 +310,9 @@ impl LiveTradingEngine {
                 timestamp: Utc::now(),
                 coin: coin.to_string(),
                 spread_pct: spread,
-                threshold_pct: ENTRY_SPREAD_THRESHOLD,
+                dynamic_entry_pct: dynamic_entry,
+                dynamic_exit_pct: dynamic_exit,
+                spread_velocity: Some(spread_velocity),
                 buy_exchange,
                 sell_exchange,
                 buy_price,
@@ -422,6 +433,7 @@ impl LiveTradingEngine {
         sell_last_price: f64,
         spread: f64,
         dynamic_entry: f64,
+        dynamic_exit: f64,
         spread_velocity: f64,
         funding_store: &FundingStore,
         price_store: &PriceStore,
@@ -435,7 +447,7 @@ impl LiveTradingEngine {
                 sell_exchange,
                 buy_last_price,
                 sell_last_price,
-                spread,
+                spread, dynamic_entry, dynamic_exit, spread_velocity,
                 None,
                 "ALREADY_OPEN: Position already open on this coin".to_string(),
             );
@@ -446,7 +458,7 @@ impl LiveTradingEngine {
         if self.emergency_halt {
             eprintln!("[LiveTrading] 🚨 EMERGENCY HALT active — skipping new opens until cleared (press R to reset)");
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_last_price, sell_last_price, spread, None,
+                coin, buy_exchange, sell_exchange, buy_last_price, sell_last_price, spread, dynamic_entry, dynamic_exit, spread_velocity, None,
                 "EMERGENCY_HALT: Emergency halt active from previous failed reversal — press R to reset".to_string(),
             );
             return false;
@@ -461,7 +473,7 @@ impl LiveTradingEngine {
                 sell_exchange,
                 buy_last_price,
                 sell_last_price,
-                spread,
+                spread, dynamic_entry, dynamic_exit, spread_velocity,
                 None,
                 format!(
                     "COOLDOWN: Coin in cooldown ({}s remaining of {}s)",
@@ -472,7 +484,7 @@ impl LiveTradingEngine {
         }
 
         // Spread must meet entry threshold and not exceed sanity ceiling
-        if spread < ENTRY_SPREAD_THRESHOLD || spread > MAX_SPREAD_THRESHOLD {
+        if spread < dynamic_entry || spread > MAX_SPREAD_THRESHOLD {
             return false;
         }
 
@@ -490,7 +502,7 @@ impl LiveTradingEngine {
                 sell_exchange,
                 buy_last_price,
                 sell_last_price,
-                spread,
+                spread, dynamic_entry, dynamic_exit, spread_velocity,
                 None,
                 format!(
                     "MAX_POSITIONS_REACHED: Currently {}/{} open positions (holding: {})",
@@ -516,7 +528,7 @@ impl LiveTradingEngine {
                 sell_exchange,
                 buy_last_price,
                 sell_last_price,
-                spread,
+                spread, dynamic_entry, dynamic_exit, spread_velocity,
                 None,
                 format!(
                     "1H_FUNDING_COIN: Skipped coin with {}h funding interval (high volatility)",
@@ -539,7 +551,7 @@ impl LiveTradingEngine {
                 sell_exchange,
                 buy_last_price,
                 sell_last_price,
-                spread,
+                spread, dynamic_entry, dynamic_exit, spread_velocity,
                 None,
                 format!(
                     "NEAR_FUNDING: Within {}m funding pause window (next funding in {})",
@@ -559,7 +571,7 @@ impl LiveTradingEngine {
                     sell_exchange,
                     buy_last_price,
                     sell_last_price,
-                    spread,
+                    spread, dynamic_entry, dynamic_exit, spread_velocity,
                     None,
                     format!(
                         "ORDERBOOK_EMPTY: Missing best ask in {} order book",
@@ -578,7 +590,7 @@ impl LiveTradingEngine {
                     sell_exchange,
                     buy_last_price,
                     sell_last_price,
-                    spread,
+                    spread, dynamic_entry, dynamic_exit, spread_velocity,
                     None,
                     format!(
                         "ORDERBOOK_EMPTY: Missing best bid in {} order book",
@@ -597,7 +609,7 @@ impl LiveTradingEngine {
                 sell_exchange,
                 buy_ask,
                 sell_bid,
-                spread,
+                spread, dynamic_entry, dynamic_exit, spread_velocity,
                 Some(raw_book_spread),
                 format!(
                     "ORDERBOOK_CROSSED: Buy ask ({:.6}) >= Sell bid ({:.6})",
@@ -607,10 +619,10 @@ impl LiveTradingEngine {
             return false;
         }
         let book_spread_pct = ((sell_bid - buy_ask) / buy_ask) * 100.0;
-        if book_spread_pct < ENTRY_SPREAD_THRESHOLD {
+        if book_spread_pct < dynamic_entry {
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
-                format!("BOOK_SPREAD_BELOW_MIN: Real orderbook spread {:.3}% < required entry threshold {:.2}%", book_spread_pct, ENTRY_SPREAD_THRESHOLD),
+                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
+                format!("BOOK_SPREAD_BELOW_MIN: Real orderbook spread {:.3}% < required entry threshold {:.2}%", book_spread_pct, dynamic_entry),
             );
             return false;
         }
@@ -621,7 +633,7 @@ impl LiveTradingEngine {
                 sell_exchange,
                 buy_ask,
                 sell_bid,
-                spread,
+                spread, dynamic_entry, dynamic_exit, spread_velocity,
                 Some(book_spread_pct),
                 format!(
                     "BOOK_SPREAD_TOO_HIGH: Orderbook spread {:.2}% > max sanity {:.2}%",
@@ -638,11 +650,11 @@ impl LiveTradingEngine {
             + taker_fee(sell_exchange);
         let total_fee_pct = total_fee_rate * 100.0;
 
-        let min_profitable_spread = total_fee_pct + EXIT_SPREAD_THRESHOLD + 0.1;
+        let min_profitable_spread = total_fee_pct + dynamic_exit + 0.1;
         if book_spread_pct < min_profitable_spread {
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
-                format!("BOOK_SPREAD_NOT_PROFITABLE: Book spread {:.3}% < min required {:.3}% (fees {:.3}% + exit {:.2}% + 0.1% buffer)", book_spread_pct, min_profitable_spread, total_fee_pct, EXIT_SPREAD_THRESHOLD),
+                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
+                format!("BOOK_SPREAD_NOT_PROFITABLE: Book spread {:.3}% < min required {:.3}% (fees {:.3}% + exit {:.2}% + 0.1% buffer)", book_spread_pct, min_profitable_spread, total_fee_pct, dynamic_exit),
             );
             return false;
         }
@@ -655,7 +667,7 @@ impl LiveTradingEngine {
             Some(params) => params,
             None => {
                 self.log_missed(
-                    coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
+                    coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
                     format!("INSUFFICIENT_BALANCE: Balance below minimum ${:.2} (Binance: ${:.2}, Bybit: ${:.2})", MIN_BALANCE_USDT, self.binance_balance, self.bybit_balance),
                 );
                 return false; // Insufficient balance
@@ -673,7 +685,7 @@ impl LiveTradingEngine {
                     sell_exchange,
                     buy_ask,
                     sell_bid,
-                    spread,
+                    spread, dynamic_entry, dynamic_exit, spread_velocity,
                     Some(book_spread_pct),
                     format!(
                         "ORDERBOOK_EMPTY: Missing best ask qty in {} order book",
@@ -693,7 +705,7 @@ impl LiveTradingEngine {
                     sell_exchange,
                     buy_ask,
                     sell_bid,
-                    spread,
+                    spread, dynamic_entry, dynamic_exit, spread_velocity,
                     Some(book_spread_pct),
                     format!(
                         "ORDERBOOK_EMPTY: Missing best bid qty in {} order book",
@@ -720,7 +732,7 @@ impl LiveTradingEngine {
         // Skip micro-trades after liquidity adjustment
         if trade_usdt < 5.0 {
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
+                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
                 format!("LOW_LIQUIDITY: Orderbook depth allows only ${:.2} trade size (< $5.00 min). BuyLiq: ${:.2}, SellLiq: ${:.2}", trade_usdt, buy_liquidity, sell_liquidity),
             );
             return false;
@@ -754,7 +766,7 @@ impl LiveTradingEngine {
                 sell_exchange,
                 buy_ask,
                 sell_bid,
-                spread,
+                spread, dynamic_entry, dynamic_exit, spread_velocity,
                 Some(book_spread_pct),
                 format!(
                     "QTY_ZERO: Calculated quantity rounded to 0.0 (price=${:.4})",
@@ -770,7 +782,7 @@ impl LiveTradingEngine {
         let min_notional = self.get_min_notional(&symbol, Exchange::Binance).await;
         if buy_notional < min_notional * 1.05 || sell_notional < min_notional * 1.05 {
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
+                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
                 format!("BELOW_MIN_NOTIONAL: Notional ${:.2}/{:.2} < min ${:.2} (qty={:.4}, prices={:.6}/{:.6})", 
                     buy_notional, sell_notional, min_notional, quantity, buy_ask, sell_bid),
             );
@@ -801,7 +813,7 @@ impl LiveTradingEngine {
                 coin, buy_exchange, buy_balance, required_margin, trade_usdt, FIXED_LEVERAGE
             );
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
+                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
                 format!("INSUFFICIENT_MARGIN_BUY: {} balance ${:.2} < required margin ${:.2} for ${:.0} trade at {}x", buy_exchange, buy_balance, required_margin, trade_usdt, FIXED_LEVERAGE),
             );
             return false;
@@ -812,7 +824,7 @@ impl LiveTradingEngine {
                 coin, sell_exchange, sell_balance, required_margin, trade_usdt, FIXED_LEVERAGE
             );
             self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
+                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
                 format!("INSUFFICIENT_MARGIN_SELL: {} balance ${:.2} < required margin ${:.2} for ${:.0} trade at {}x", sell_exchange, sell_balance, required_margin, trade_usdt, FIXED_LEVERAGE),
             );
             return false;
@@ -900,23 +912,23 @@ impl LiveTradingEngine {
                         Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"), coin, cur_ask, cur_bid
                     );
                     self.log_missed_with_latency(
-                        coin, buy_exchange, sell_exchange, cur_ask, cur_bid, spread, None,
+                        coin, buy_exchange, sell_exchange, cur_ask, cur_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, None,
                         format!("PRE_FLIGHT_BOOK_INVALID: Pre-flight check failed — Ask ({:.6}) >= Bid ({:.6})", cur_ask, cur_bid),
                         Some(latency.clone()),
                     );
                     return false;
                 }
                 let cur_spread = ((cur_bid - cur_ask) / cur_ask) * 100.0;
-                if cur_spread < ENTRY_SPREAD_THRESHOLD {
+                if cur_spread < dynamic_entry {
                     eprintln!(
                         "[{}][LiveTrading] ABORT {}: Spread slipped from {:.3}% to {:.3}% right before execution (< {:.2}%)",
-                        Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"), coin, book_spread_pct, cur_spread, ENTRY_SPREAD_THRESHOLD
+                        Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"), coin, book_spread_pct, cur_spread, dynamic_entry
                     );
                     latency.mark_pre_flight(cur_ask, cur_bid, cur_spread);
                     latency.compute_derived();
                     self.log_missed_with_latency(
-                        coin, buy_exchange, sell_exchange, cur_ask, cur_bid, spread, Some(cur_spread),
-                        format!("PRE_FLIGHT_SPREAD_COLLAPSED: Spread dropped to {:.3}% during pre-trade checks (< {:.2}%)", cur_spread, ENTRY_SPREAD_THRESHOLD),
+                        coin, buy_exchange, sell_exchange, cur_ask, cur_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(cur_spread),
+                        format!("PRE_FLIGHT_SPREAD_COLLAPSED: Spread dropped to {:.3}% during pre-trade checks (< {:.2}%)", cur_spread, dynamic_entry),
                         Some(latency.clone()),
                     );
                     return false;
@@ -996,7 +1008,7 @@ impl LiveTradingEngine {
                         );
 
                         self.log_missed_with_latency(
-                            coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
+                            coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
                             format!("LEG_FILL_FAILED: Sell on Bybit failed ({}) [RTT: Bybit={}ms, Binance={}ms] — reversed Binance Buy (rev: {}ms)", e, sell_rtt_ms, buy_rtt_ms, rev_rtt_ms),
                             Some(latency.clone()),
                         );
@@ -1035,7 +1047,7 @@ impl LiveTradingEngine {
                         );
 
                         self.log_missed_with_latency(
-                            coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
+                            coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
                             format!("LEG_FILL_FAILED: Buy on Binance failed ({}) [RTT: Binance={}ms, Bybit={}ms] — reversed Bybit Sell (rev: {}ms)", e, buy_rtt_ms, sell_rtt_ms, rev_rtt_ms),
                             Some(latency.clone()),
                         );
@@ -1070,7 +1082,7 @@ impl LiveTradingEngine {
                             sell_exchange,
                             buy_ask,
                             sell_bid,
-                            spread,
+                            spread, dynamic_entry, dynamic_exit, spread_velocity,
                             Some(book_spread_pct),
                             format!(
                                 "BOTH_LEGS_FAILED: Buy err: {} ({}ms), Sell err: {} ({}ms)",
@@ -1135,7 +1147,7 @@ impl LiveTradingEngine {
                         );
 
                         self.log_missed_with_latency(
-                            coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
+                            coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
                             format!("LEG_FILL_FAILED: Sell on Binance failed ({}) [RTT: Binance={}ms, Bybit={}ms] — reversed Bybit Buy (rev: {}ms)", e, sell_rtt_ms, buy_rtt_ms, rev_rtt_ms),
                             Some(latency.clone()),
                         );
@@ -1174,7 +1186,7 @@ impl LiveTradingEngine {
                         );
 
                         self.log_missed_with_latency(
-                            coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
+                            coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
                             format!("LEG_FILL_FAILED: Buy on Bybit failed ({}) [RTT: Bybit={}ms, Binance={}ms] — reversed Binance Sell (rev: {}ms)", e, buy_rtt_ms, sell_rtt_ms, rev_rtt_ms),
                             Some(latency.clone()),
                         );
@@ -1204,7 +1216,7 @@ impl LiveTradingEngine {
                         );
 
                         self.log_missed_with_latency(
-                            coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, Some(book_spread_pct),
+                            coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
                             format!("BOTH_LEGS_FAILED: Buy (Bybit): {} [{}ms], Sell (Binance): {} [{}ms]", e1, buy_rtt_ms, e2, sell_rtt_ms),
                             Some(latency.clone()),
                         );
@@ -1988,6 +2000,7 @@ struct OpenCandidate {
     sell_price: f64,
     spread: f64,
     dynamic_entry: f64,
+    dynamic_exit: f64,
     spread_velocity: f64,
     /// Latency profiler pre-populated with book_update_ms and detected_ms at scan time.
     latency: TradeLatency,
@@ -2342,6 +2355,7 @@ pub async fn run_trading_loop(
                                 byb_bid,
                                 effective_spread_a,
                                 stats_a.get_entry_threshold(current_time_ms).unwrap_or(0.0),
+                                stats_a.get_exit_threshold(current_time_ms).unwrap_or(0.0),
                                 stats_a.spread_velocity,
                             ));
                         }
@@ -2354,33 +2368,35 @@ pub async fn run_trading_loop(
                 }
             }
 
-            crate::opportunity_logger::log_opportunity(&crate::opportunity_logger::OpportunityRecord {
-                timestamp: chrono::Utc::now(),
-                symbol: coin.clone(),
-                direction: "Binance->Bybit".to_string(),
-                raw_bid: bin_bid,
-                raw_ask: bin_ask,
-                effective_buy_price: bin_ask,
-                effective_sell_price: byb_bid,
-                gross_spread_pct: ((byb_bid - bin_ask) / bin_ask) * 100.0,
-                effective_spread_pct: eff_spread_a,
-                baseline_spread_pct: stats_a.rolling_median,
-                spread_volatility_pct: stats_a.get_spread_volatility(),
-                dynamic_entry_threshold_pct: stats_a.get_entry_threshold(current_time_ms).unwrap_or(0.0),
-                dynamic_exit_threshold_pct: stats_a.get_exit_threshold(current_time_ms).unwrap_or(0.0),
-                z_score: if stats_a.get_spread_volatility() > 0.0 { (eff_spread_a - stats_a.rolling_median) / stats_a.get_spread_volatility() } else { 0.0 },
-                spread_velocity: stats_a.spread_velocity,
-                expected_slippage_pct: 0.0,
-                buy_fee_pct: 0.0,
-                sell_fee_pct: 0.0,
-                net_edge_pct: eff_spread_a,
-                signal_age_ms: 0,
-                liquidity_ok: reject_a != Some(crate::rejection::RejectionReason::INSUFFICIENT_LIQUIDITY),
-                data_fresh_ok: bin_fresh && byb_fresh,
-                entry_decision: candidate_opt.is_some(),
-                reject_reason: reject_a.clone(),
-                exit_trigger_condition: None,
-            });
+            if crate::opportunity_logger::ENABLE_OPPORTUNITY_LOGGING {
+                crate::opportunity_logger::log_opportunity(&crate::opportunity_logger::OpportunityRecord {
+                    timestamp: chrono::Utc::now(),
+                    symbol: coin.clone(),
+                    direction: "Binance->Bybit".to_string(),
+                    raw_bid: bin_bid,
+                    raw_ask: bin_ask,
+                    effective_buy_price: bin_ask,
+                    effective_sell_price: byb_bid,
+                    gross_spread_pct: ((byb_bid - bin_ask) / bin_ask) * 100.0,
+                    effective_spread_pct: eff_spread_a,
+                    baseline_spread_pct: stats_a.rolling_median,
+                    spread_volatility_pct: stats_a.get_spread_volatility(),
+                    dynamic_entry_threshold_pct: stats_a.get_entry_threshold(current_time_ms).unwrap_or(0.0),
+                    dynamic_exit_threshold_pct: stats_a.get_exit_threshold(current_time_ms).unwrap_or(0.0),
+                    z_score: if stats_a.get_spread_volatility() > 0.0 { (eff_spread_a - stats_a.rolling_median) / stats_a.get_spread_volatility() } else { 0.0 },
+                    spread_velocity: stats_a.spread_velocity,
+                    expected_slippage_pct: 0.0,
+                    buy_fee_pct: 0.0,
+                    sell_fee_pct: 0.0,
+                    net_edge_pct: eff_spread_a,
+                    signal_age_ms: 0,
+                    liquidity_ok: reject_a != Some(crate::rejection::RejectionReason::INSUFFICIENT_LIQUIDITY),
+                    data_fresh_ok: bin_fresh && byb_fresh,
+                    entry_decision: candidate_opt.is_some(),
+                    reject_reason: reject_a.clone(),
+                    exit_trigger_condition: None,
+                });
+            }
 
             // Direction B: Buy Bybit, Sell Binance
             if candidate_opt.is_none() {
@@ -2413,6 +2429,7 @@ pub async fn run_trading_loop(
                                     bin_bid,
                                     effective_spread_b,
                                     stats_b.get_entry_threshold(current_time_ms).unwrap_or(0.0),
+                                    stats_b.get_exit_threshold(current_time_ms).unwrap_or(0.0),
                                     stats_b.spread_velocity,
                                 ));
                             }
@@ -2425,36 +2442,38 @@ pub async fn run_trading_loop(
                     }
                 }
 
-                crate::opportunity_logger::log_opportunity(&crate::opportunity_logger::OpportunityRecord {
-                    timestamp: chrono::Utc::now(),
-                    symbol: coin.clone(),
-                    direction: "Bybit->Binance".to_string(),
-                    raw_bid: byb_bid,
-                    raw_ask: byb_ask,
-                    effective_buy_price: byb_ask,
-                    effective_sell_price: bin_bid,
-                    gross_spread_pct: ((bin_bid - byb_ask) / byb_ask) * 100.0,
-                    effective_spread_pct: eff_spread_b,
-                    baseline_spread_pct: stats_b.rolling_median,
-                    spread_volatility_pct: stats_b.get_spread_volatility(),
-                    dynamic_entry_threshold_pct: stats_b.get_entry_threshold(current_time_ms).unwrap_or(0.0),
-                    dynamic_exit_threshold_pct: stats_b.get_exit_threshold(current_time_ms).unwrap_or(0.0),
-                    z_score: if stats_b.get_spread_volatility() > 0.0 { (eff_spread_b - stats_b.rolling_median) / stats_b.get_spread_volatility() } else { 0.0 },
-                    spread_velocity: stats_b.spread_velocity,
-                    expected_slippage_pct: 0.0,
-                    buy_fee_pct: 0.0,
-                    sell_fee_pct: 0.0,
-                    net_edge_pct: eff_spread_b,
-                    signal_age_ms: 0,
-                    liquidity_ok: reject_b != Some(crate::rejection::RejectionReason::INSUFFICIENT_LIQUIDITY),
-                    data_fresh_ok: bin_fresh && byb_fresh,
-                    entry_decision: candidate_opt.is_some(),
-                    reject_reason: reject_b.clone(),
-                    exit_trigger_condition: None,
-                });
+                if crate::opportunity_logger::ENABLE_OPPORTUNITY_LOGGING {
+                    crate::opportunity_logger::log_opportunity(&crate::opportunity_logger::OpportunityRecord {
+                        timestamp: chrono::Utc::now(),
+                        symbol: coin.clone(),
+                        direction: "Bybit->Binance".to_string(),
+                        raw_bid: byb_bid,
+                        raw_ask: byb_ask,
+                        effective_buy_price: byb_ask,
+                        effective_sell_price: bin_bid,
+                        gross_spread_pct: ((bin_bid - byb_ask) / byb_ask) * 100.0,
+                        effective_spread_pct: eff_spread_b,
+                        baseline_spread_pct: stats_b.rolling_median,
+                        spread_volatility_pct: stats_b.get_spread_volatility(),
+                        dynamic_entry_threshold_pct: stats_b.get_entry_threshold(current_time_ms).unwrap_or(0.0),
+                        dynamic_exit_threshold_pct: stats_b.get_exit_threshold(current_time_ms).unwrap_or(0.0),
+                        z_score: if stats_b.get_spread_volatility() > 0.0 { (eff_spread_b - stats_b.rolling_median) / stats_b.get_spread_volatility() } else { 0.0 },
+                        spread_velocity: stats_b.spread_velocity,
+                        expected_slippage_pct: 0.0,
+                        buy_fee_pct: 0.0,
+                        sell_fee_pct: 0.0,
+                        net_edge_pct: eff_spread_b,
+                        signal_age_ms: 0,
+                        liquidity_ok: reject_b != Some(crate::rejection::RejectionReason::INSUFFICIENT_LIQUIDITY),
+                        data_fresh_ok: bin_fresh && byb_fresh,
+                        entry_decision: candidate_opt.is_some(),
+                        reject_reason: reject_b.clone(),
+                        exit_trigger_condition: None,
+                    });
+                }
             }
 
-            if let Some((buy_ex, sell_ex, buy_price_val, sell_price_val, s, dyn_entry, vel)) =
+            if let Some((buy_ex, sell_ex, buy_price_val, sell_price_val, s, dyn_entry, dyn_exit, vel)) =
                 candidate_opt
             {
                 let buy_book = get_order_book(&prices, buy_ex).clone();
@@ -2478,6 +2497,7 @@ pub async fn run_trading_loop(
                     sell_price: sell_price_val,
                     spread: s,
                     dynamic_entry: dyn_entry,
+                    dynamic_exit: dyn_exit,
                     spread_velocity: vel,
                     latency: lat,
                 });
@@ -2504,7 +2524,7 @@ pub async fn run_trading_loop(
                         candidate.sell_ex,
                         candidate.buy_price,
                         candidate.sell_price,
-                        candidate.spread,
+                        candidate.spread, candidate.dynamic_entry, candidate.dynamic_exit, candidate.spread_velocity,
                         None,
                         format!(
                             "SESSION_LIMIT_REACHED: Session limit of {} trades reached ({}/{})",
@@ -2521,7 +2541,7 @@ pub async fn run_trading_loop(
                         candidate.sell_ex,
                         candidate.buy_price,
                         candidate.sell_price,
-                        candidate.spread,
+                        candidate.spread, candidate.dynamic_entry, candidate.dynamic_exit, candidate.spread_velocity,
                         None,
                         "TRADING_PAUSED: Trading is disabled in TUI (press T to enable)".to_string(),
                     );
@@ -2542,7 +2562,7 @@ pub async fn run_trading_loop(
                         candidate.sell_ex,
                         candidate.buy_price,
                         candidate.sell_price,
-                        candidate.spread,
+                        candidate.spread, candidate.dynamic_entry, candidate.dynamic_exit, candidate.spread_velocity,
                         None,
                         format!(
                             "MAX_POSITIONS_REACHED: Currently {}/{} open positions (holding: {})",
@@ -2565,6 +2585,7 @@ pub async fn run_trading_loop(
                         candidate.sell_price,
                         candidate.spread,
                         candidate.dynamic_entry,
+                        candidate.dynamic_exit,
                         candidate.spread_velocity,
                         &funding_store,
                         &store,

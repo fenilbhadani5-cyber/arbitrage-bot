@@ -1,13 +1,15 @@
+//! Opportunity Logger
+//!
+//! Opportunity logging is disabled entirely.
+//! Actual trades are saved in `live_trades.jsonl` and missed trades in `missed_trades.jsonl` / `missed_trades.log`.
+
 use chrono::{DateTime, Utc};
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::sync::Mutex;
-use std::time::Instant;
 
 use crate::rejection::RejectionReason;
+
+/// Global toggle to enable/disable opportunity logging.
+pub const ENABLE_OPPORTUNITY_LOGGING: bool = false;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpportunityRecord {
@@ -38,44 +40,10 @@ pub struct OpportunityRecord {
     pub exit_trigger_condition: Option<String>,
 }
 
-static OPP_THROTTLE: Mutex<Option<HashMap<String, (Option<RejectionReason>, Instant)>>> =
-    Mutex::new(None);
-const THROTTLE_SECS: u64 = 1;
-
-lazy_static! {
-    static ref LOG_FILE: Mutex<std::fs::File> = Mutex::new(
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("opportunities.jsonl")
-            .expect("Failed to open opportunities.jsonl")
-    );
-}
-
+/// Disables opportunity logging entirely. Does not open or write to opportunities.jsonl.
+#[inline(always)]
+#[allow(unused_variables)]
 pub fn log_opportunity(record: &OpportunityRecord) {
-    // Throttle duplicates (same coin, same reason)
-    {
-        let mut guard = match OPP_THROTTLE.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let map = guard.get_or_insert_with(HashMap::new);
-        let now = Instant::now();
-        let key = format!("{}_{}", record.symbol, record.direction);
-
-        if let Some((prev_reason, last_time)) = map.get(&key) {
-            if prev_reason == &record.reject_reason
-                && now.duration_since(*last_time).as_secs() < THROTTLE_SECS
-            {
-                return;
-            }
-        }
-        map.insert(key, (record.reject_reason.clone(), now));
-    }
-
-    if let Ok(json) = serde_json::to_string(record) {
-        if let Ok(mut file) = LOG_FILE.lock() {
-            let _ = writeln!(file, "{}", json);
-        }
-    }
+    // Disabled entirely: no-op, avoiding file I/O and mutex contention
 }
+
