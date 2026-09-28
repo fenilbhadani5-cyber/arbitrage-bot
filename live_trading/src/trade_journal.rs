@@ -86,6 +86,9 @@ pub struct TradeRecord {
     pub sell_book_ask_qty: Option<f64>,
 
     // ── Close-specific fields (only present on CLOSE records) ──
+    /// The dynamic exit threshold that triggered this close
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_exit: Option<f64>,
     /// Price at which the close-leg buy was filled
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_buy_price: Option<f64>,

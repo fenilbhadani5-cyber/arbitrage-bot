@@ -1565,6 +1565,7 @@ impl LiveTradingEngine {
             sell_book_ask: sell_book.best_ask.unwrap_or(0.0),
             sell_book_bid_qty: sell_book.best_bid_qty,
             sell_book_ask_qty: sell_book.best_ask_qty,
+            dynamic_exit: None, // Open records don't have dynamic_exit
             close_buy_price: None,
             close_sell_price: None,
             close_buy_commission: None,
@@ -1949,6 +1950,13 @@ impl LiveTradingEngine {
         self.open_positions.remove(coin);
         self.last_trade_time.insert(coin.to_string(), Utc::now());
 
+        // Calculate actual executed exit spread based on real fill prices
+        let actual_exit_spread = if close_sell_price > 0.0 {
+            ((close_buy_price - close_sell_price) / close_sell_price) * 100.0
+        } else {
+            0.0
+        };
+
         // Build CLOSE trade record with all real exchange data
         let record = TradeRecord {
             id: self.trade_count,
@@ -1971,7 +1979,7 @@ impl LiveTradingEngine {
             sell_commission_asset: "USDT".to_string(),
             total_fee: total_all_fees,
             spread_before: position.entry_spread,
-            spread_after: current_spread,
+            spread_after: actual_exit_spread,
             pnl_gross: gross_pnl,
             pnl_net: net_pnl,
             exchange_realized_pnl: 0.0,
@@ -1983,6 +1991,7 @@ impl LiveTradingEngine {
             sell_book_ask: position.entry_sell_book_ask,
             sell_book_bid_qty: position.entry_sell_book_bid_qty,
             sell_book_ask_qty: position.entry_sell_book_ask_qty,
+            dynamic_exit: Some(dynamic_exit),
             close_buy_price: Some(close_buy_price),
             close_sell_price: Some(close_sell_price),
             close_buy_commission: Some(close_buy_commission),
@@ -1993,7 +2002,7 @@ impl LiveTradingEngine {
             total_close_fees: Some(total_close_fee),
             hold_duration_secs: Some(hold_secs),
             entry_spread: Some(position.entry_spread),
-            exit_spread: Some(current_spread),
+            exit_spread: Some(actual_exit_spread),
             funding_interval_hours: Some(position.funding_hours),
             latency: None, // close leg latency not tracked (fast path)
             real_account_entry_buy: None,
@@ -2016,10 +2025,10 @@ impl LiveTradingEngine {
         self.push_recent_trade(record.clone());
 
         eprintln!(
-            "[{}][LiveTrading] CLOSE #{}: {} | Held {}s | Entry: {:.4}% → Exit: {:.4}% | DynExit: {:.3}% | Gross: ${:.4} | Fees: ${:.4} | Net: ${:.4}",
+            "[{}][LiveTrading] CLOSE #{}: {} | Held {}s | Entry: {:.4}% → Target: {:.4}%, Quoted: {:.4}%, Actual: {:.4}% | Gross: ${:.4} | Fees: ${:.4} | Net: ${:.4}",
             Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
             self.trade_count, coin, hold_secs,
-            position.entry_spread, current_spread, dynamic_exit,
+            position.entry_spread, dynamic_exit, current_spread, actual_exit_spread,
             gross_pnl, total_all_fees, net_pnl
         );
 
