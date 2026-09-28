@@ -16,8 +16,12 @@ def load(path):
                 print("parse fail", path, i, e)
     return rows
 
-live = load(r"D:\Arbitrage\live_trades.jsonl")
-missed = load(r"D:\Arbitrage\missed_trades.jsonl")
+import os
+
+live_path = r"D:\Arbitrage\live_trades.jsonl" if os.path.exists(r"D:\Arbitrage\live_trades.jsonl") else "live_trades.jsonl"
+missed_path = r"D:\Arbitrage\missed_trades.jsonl" if os.path.exists(r"D:\Arbitrage\missed_trades.jsonl") else "missed_trades.jsonl"
+live = load(live_path)
+missed = load(missed_path)
 
 print("==== LIVE TRADES ====")
 opens = [r for r in live if r.get("trade_type") == "Open"]

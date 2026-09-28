@@ -217,6 +217,23 @@ impl LiveTradingEngine {
         self.open_positions.len()
     }
 
+    /// Calculate total margin consumed by existing open positions on a specific exchange.
+    /// Each open position locks (quote_value / FIXED_LEVERAGE) as margin on the exchange
+    /// where that leg was executed. This must be subtracted from available balance
+    /// before attempting new trades, otherwise the exchange rejects with "Margin insufficient".
+    fn margin_in_use_on(&self, exchange: Exchange) -> f64 {
+        let mut used = 0.0;
+        for pos in self.open_positions.values() {
+            if pos.buy_exchange == exchange {
+                used += pos.buy_quote_value / FIXED_LEVERAGE as f64;
+            }
+            if pos.sell_exchange == exchange {
+                used += pos.sell_quote_value / FIXED_LEVERAGE as f64;
+            }
+        }
+        used
+    }
+
     /// Compute total unrealized PnL across all open positions.
     pub fn total_unrealized_pnl(&self, store: &PriceStore) -> f64 {
         let mut total = 0.0;
@@ -803,29 +820,34 @@ impl LiveTradingEngine {
         // No need to hit the exchange REST API again here — that costs 50–150ms.
         let buy_balance = self.get_balance(buy_exchange);
         let sell_balance = self.get_balance(sell_exchange);
+        let buy_margin_used = self.margin_in_use_on(buy_exchange);
+        let sell_margin_used = self.margin_in_use_on(sell_exchange);
+        let buy_available = buy_balance - buy_margin_used;
+        let sell_available = sell_balance - sell_margin_used;
 
-        // Each side needs at least (trade_usdt / 10x) as margin, +10% buffer for fees and slippage.
-        let required_margin = (trade_usdt / FIXED_LEVERAGE as f64) * 1.10;
+        // Each side needs (trade_usdt / leverage) as margin, +20% buffer for fees,
+        // slippage, and exchange-side maintenance margin requirements.
+        let required_margin = (trade_usdt / FIXED_LEVERAGE as f64) * 1.20;
 
-        if buy_balance < required_margin {
+        if buy_available < required_margin {
             eprintln!(
-                "[LiveTrading] ABORT {}: {} balance ${:.2} too low — need ${:.2} margin for ${:.0} trade at {}x",
-                coin, buy_exchange, buy_balance, required_margin, trade_usdt, FIXED_LEVERAGE
+                "[LiveTrading] ABORT {}: {} available margin ${:.2} too low (bal ${:.2} - ${:.2} in-use) — need ${:.2} for ${:.0} at {}x",
+                coin, buy_exchange, buy_available, buy_balance, buy_margin_used, required_margin, trade_usdt, FIXED_LEVERAGE
             );
             self.log_missed(
                 coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
-                format!("INSUFFICIENT_MARGIN_BUY: {} balance ${:.2} < required margin ${:.2} for ${:.0} trade at {}x", buy_exchange, buy_balance, required_margin, trade_usdt, FIXED_LEVERAGE),
+                format!("INSUFFICIENT_MARGIN_BUY: {} avail ${:.2} (bal ${:.2} - ${:.2} in-use) < required ${:.2} for ${:.0} at {}x", buy_exchange, buy_available, buy_balance, buy_margin_used, required_margin, trade_usdt, FIXED_LEVERAGE),
             );
             return false;
         }
-        if sell_balance < required_margin {
+        if sell_available < required_margin {
             eprintln!(
-                "[LiveTrading] ABORT {}: {} balance ${:.2} too low — need ${:.2} margin for ${:.0} trade at {}x",
-                coin, sell_exchange, sell_balance, required_margin, trade_usdt, FIXED_LEVERAGE
+                "[LiveTrading] ABORT {}: {} available margin ${:.2} too low (bal ${:.2} - ${:.2} in-use) — need ${:.2} for ${:.0} at {}x",
+                coin, sell_exchange, sell_available, sell_balance, sell_margin_used, required_margin, trade_usdt, FIXED_LEVERAGE
             );
             self.log_missed(
                 coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
-                format!("INSUFFICIENT_MARGIN_SELL: {} balance ${:.2} < required margin ${:.2} for ${:.0} trade at {}x", sell_exchange, sell_balance, required_margin, trade_usdt, FIXED_LEVERAGE),
+                format!("INSUFFICIENT_MARGIN_SELL: {} avail ${:.2} (bal ${:.2} - ${:.2} in-use) < required ${:.2} for ${:.0} at {}x", sell_exchange, sell_available, sell_balance, sell_margin_used, required_margin, trade_usdt, FIXED_LEVERAGE),
             );
             return false;
         }
@@ -897,6 +919,41 @@ impl LiveTradingEngine {
                 filled_qty: f.filled_qty,
                 quote_qty: f.quote_qty,
                 commission: f.commission,
+            }
+        }
+
+        // ── BOOK EPOCH STALENESS CHECK: Ensure book data is actually fresh right before firing ──
+        // The main loop freshness check may have passed 1000ms+ ago due to candidate processing delay.
+        // This catches cases where book_to_send_ms > 1000ms (spread is already gone by execution time).
+        {
+            let now_epoch_ms = Utc::now().timestamp_millis();
+            if let Some(fresh_prices) = price_store.get(coin) {
+                let buy_book_epoch = match buy_exchange {
+                    Exchange::Binance => fresh_prices.binance_book_epoch_ms,
+                    Exchange::Bybit => fresh_prices.bybit_book_epoch_ms,
+                };
+                let sell_book_epoch = match sell_exchange {
+                    Exchange::Binance => fresh_prices.binance_book_epoch_ms,
+                    Exchange::Bybit => fresh_prices.bybit_book_epoch_ms,
+                };
+
+                let buy_age = buy_book_epoch.map(|e| now_epoch_ms - e).unwrap_or(i64::MAX);
+                let sell_age = sell_book_epoch.map(|e| now_epoch_ms - e).unwrap_or(i64::MAX);
+                let max_age = MAX_BOOK_AGE_MILLIS as i64;
+
+                if buy_age > max_age || sell_age > max_age {
+                    eprintln!(
+                        "[{}][LiveTrading] ABORT {}: Book data stale at execution time — buy-side {}ms, sell-side {}ms (max {}ms)",
+                        Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"), coin, buy_age, sell_age, max_age
+                    );
+                    latency.compute_derived();
+                    self.log_missed_with_latency(
+                        coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
+                        format!("STALE_BOOK_ABORT: Book data too old at execution time — buy {}ms, sell {}ms (max {}ms)", buy_age, sell_age, max_age),
+                        Some(latency.clone()),
+                    );
+                    return false;
+                }
             }
         }
 
