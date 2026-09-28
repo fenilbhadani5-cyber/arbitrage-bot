@@ -860,35 +860,36 @@ impl LiveTradingEngine {
 
         if !skip_leverage {
             eprintln!(
-                "[LiveTrading] Setting leverage {}x on both exchanges for {} (backgrounding)",
+                "[LiveTrading] Setting leverage {}x on both exchanges for {} (blocking first trade)",
                 leverage, symbol
             );
 
-            let bin_cli = self.binance_client.clone();
-            let byb_cli = self.bybit_client.clone();
-            let sym = symbol.clone();
-
-            tokio::spawn(async move {
-                let (bin_result, byb_result) = tokio::join!(
-                    bin_cli.set_leverage(&sym, leverage),
-                    byb_cli.set_leverage(&sym, leverage)
+            let (bin_result, byb_result) = tokio::join!(
+                self.binance_client.set_leverage(&symbol, leverage),
+                self.bybit_client.set_leverage(&symbol, leverage)
+            );
+            if let Err(e) = bin_result {
+                eprintln!(
+                    "[LiveTrading] WARNING: Failed to set leverage on Binance for {}: {}",
+                    symbol, e
                 );
-                if let Err(e) = bin_result {
-                    eprintln!(
-                        "[LiveTrading] WARNING: Failed to set leverage on Binance for {}: {}",
-                        sym, e
-                    );
-                }
-                if let Err(e) = byb_result {
-                    eprintln!(
-                        "[LiveTrading] WARNING: Failed to set leverage on Bybit for {}: {}",
-                        sym, e
-                    );
-                }
-            });
+            }
+            if let Err(e) = byb_result {
+                eprintln!(
+                    "[LiveTrading] WARNING: Failed to set leverage on Bybit for {}: {}",
+                    symbol, e
+                );
+            }
 
             self.leverage_cache
                 .insert(symbol.clone(), (leverage, leverage));
+                
+            // Abort this trade because prices are likely stale now after the REST API calls
+            self.log_missed(
+                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
+                "LEVERAGE_SETUP: Initialized leverage for coin, skipping this trade to ensure fresh prices.".to_string(),
+            );
+            return false;
         }
 
         // ── Unified fill struct for normalizing data from both exchanges ──
