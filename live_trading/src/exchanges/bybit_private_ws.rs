@@ -283,40 +283,20 @@ pub async fn run(
 
                                     let avg_price  = o.execPrice.parse::<f64>().unwrap_or(0.0);
                                     let filled_qty = o.execQty.parse::<f64>().unwrap_or(0.0);
-                                    let quote_qty  = o.execValue.parse::<f64>().unwrap_or(0.0);
                                     let commission = o.execFee.parse::<f64>().unwrap_or(0.0).abs();
-                                    let ts         = o.execTime.parse::<u64>().unwrap_or(0);
 
                                     eprintln!(
                                         "[BybitPrivateWS] Execution (FAST): order={} linkId={} qty={} execPrice={} fee={}",
                                         o.orderId, o.orderLinkId, filled_qty, avg_price, commission
                                     );
 
-                                    // Match on orderLinkId first (our pre-registered key),
-                                    // then fall back to orderId
-                                    let matched_key = if !o.orderLinkId.is_empty()
-                                        && pending_fills.contains_key(&o.orderLinkId)
-                                    {
-                                        o.orderLinkId.clone()
-                                    } else if pending_fills.contains_key(&o.orderId) {
-                                        o.orderId.clone()
-                                    } else {
-                                        // No pending fill registered — already resolved or stale
-                                        eprintln!("[BybitPrivateWS] No pending fill for linkId={} orderId={}", o.orderLinkId, o.orderId);
-                                        continue;
-                                    };
-
-                                    if let Some((_, sender)) = pending_fills.remove(&matched_key) {
-                                        let _ = sender.send(FillEvent {
-                                            order_id:  o.orderId,
-                                            avg_price,
-                                            filled_qty,
-                                            quote_qty,
-                                            commission,
-                                            timestamp: ts,
-                                            is_expired: false, // execution topic only fires for actual fills
-                                        });
-                                    }
+                                    // DO NOT resolve the oneshot channel here!
+                                    // Bybit market orders can have multiple partial fills.
+                                    // If we resolve on the first partial 'execution' event, the bot will think
+                                    // the order is fully finished but with a small quantity, leading to massive
+                                    // unhedged positions when the rest of the order fills.
+                                    // We ONLY log the execution here, and rely on the "order" topic below
+                                    // (which pushes "Filled" status with `cumExecQty`) to resolve the channel.
                                 }
                             }
                             Err(e) => {
