@@ -2546,10 +2546,20 @@ pub async fn run_trading_loop(
                 let buy_book = get_order_book(&prices, buy_ex).clone();
                 let sell_book = get_order_book(&prices, sell_ex).clone();
 
-                // Build latency profiler — capture book update epoch ms and detection time now
-                let book_epoch_ms = match buy_ex {
+                // Build latency profiler — capture the OLDER book update epoch ms (true signal age)
+                let buy_epoch = match buy_ex {
                     Exchange::Binance => prices.binance_book_epoch_ms,
                     Exchange::Bybit => prices.bybit_book_epoch_ms,
+                };
+                let sell_epoch = match sell_ex {
+                    Exchange::Binance => prices.binance_book_epoch_ms,
+                    Exchange::Bybit => prices.bybit_book_epoch_ms,
+                };
+                let book_epoch_ms = match (buy_epoch, sell_epoch) {
+                    (Some(b), Some(s)) => Some(b.min(s)),
+                    (Some(b), None) => Some(b),
+                    (None, Some(s)) => Some(s),
+                    (None, None) => None,
                 };
                 let mut lat = TradeLatency::new(book_epoch_ms);
                 lat.mark_detected(buy_price_val, sell_price_val, s);

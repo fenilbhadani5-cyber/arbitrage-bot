@@ -187,7 +187,7 @@ impl BinanceClient {
             api_secret,
             http_fast,
             http_slow,
-            base_url: "https://fapi.binance.com".to_string(),
+            base_url: "https://fapi2.binance.com".to_string(),
             pending_fills,
             live_balance,
             order_count_10s,
@@ -478,7 +478,14 @@ impl BinanceClient {
         self.pending_fills.insert(client_order_id.clone(), tx);
 
         // Try WebSocket API first (bypasses Cloudflare CDN, ~10-15ms vs ~210ms REST)
-        let order = if self.trade_ws.is_connected() {
+        let ws_connected = self.trade_ws.is_connected();
+        eprintln!(
+            "[{}][BinanceAPI] Order routing: {} (WS connected={})",
+            Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            if ws_connected { "WS_API (~10-15ms)" } else { "REST_FALLBACK (~30ms direct)" },
+            ws_connected
+        );
+        let order = if ws_connected {
             match self
                 .trade_ws
                 .place_order(symbol, side, quantity, &client_order_id, reduce_only, price)
