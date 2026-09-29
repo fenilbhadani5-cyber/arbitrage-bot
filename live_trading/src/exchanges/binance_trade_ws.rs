@@ -13,7 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 ///   3. Response arrives on the same WS, matched by `id` field
 ///   4. Ping every 60s to keep connection alive (Binance disconnects after 5 min idle)
 ///   5. Liveness probe every 120s via `account.status` to detect zombie connections
-///   6. Auto-reconnect on any disconnect with 500ms backoff
+///   6. Auto-reconnect on any disconnect with instant retry
 ///
 /// IMPORTANT: Unlike Bybit's Trade WS (sign once on connect), Binance WS API
 /// requires HMAC-SHA256 signature per message. However, HMAC computation takes
@@ -32,6 +32,32 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// WebSocket API base URL for Binance USDS-M Futures.
 const WS_API_URL: &str = "wss://ws-fapi.binance.com/ws-fapi/v1";
+
+/// Path to the WS debug log file. This file captures ALL WS events
+/// (connect, disconnect, ping, pong, probe, zombie, order routing)
+/// so we can diagnose connection drops even with the TUI active.
+const WS_LOG_PATH: &str = "ws_debug.log";
+
+/// Write a timestamped line to both stderr and the WS debug log file.
+/// This ensures WS diagnostics are always available even when the TUI
+/// overwrites the terminal.
+macro_rules! ws_log {
+    ($($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+        let line = format!("[{}] {}", ts, msg);
+        eprintln!("{}", line);
+        // Best-effort append to log file
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(WS_LOG_PATH)
+        {
+            let _ = writeln!(f, "{}", line);
+        }
+    }};
+}
 
 /// How often to send WebSocket pings (seconds).
 /// Binance disconnects after 5 min idle. We ping every 60s = 5x safety margin.
@@ -119,6 +145,8 @@ pub struct BinanceTradeWs {
     last_pong_ms: Arc<AtomicI64>,
     /// Total number of successful reconnections since process start.
     reconnect_count: Arc<AtomicU64>,
+    /// Epoch millis of the last disconnect. Used to track reconnect gaps.
+    last_disconnect_ms: Arc<AtomicI64>,
 }
 
 impl BinanceTradeWs {
@@ -133,6 +161,7 @@ impl BinanceTradeWs {
             req_counter: Arc::new(AtomicU64::new(1)),
             last_pong_ms: Arc::new(AtomicI64::new(0)),
             reconnect_count: Arc::new(AtomicU64::new(0)),
+            last_disconnect_ms: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -180,17 +209,41 @@ impl BinanceTradeWs {
         let handle = self.clone();
         tokio::spawn(async move {
             loop {
-                eprintln!("[BinanceTradeWS] Connecting to {}...", WS_API_URL);
+                ws_log!("[BinanceTradeWS] Connecting to {}...", WS_API_URL);
                 handle.run_connection().await;
                 handle.connected.store(false, Ordering::Relaxed);
+                handle.last_disconnect_ms.store(Self::epoch_ms_i64(), Ordering::Relaxed);
                 let n = handle.reconnect_count.fetch_add(1, Ordering::Relaxed) + 1;
-                eprintln!(
-                    "[BinanceTradeWS] Disconnected — reconnecting in 500ms (reconnect #{})",
+                ws_log!(
+                    "[BinanceTradeWS] ❌ Disconnected — reconnecting IMMEDIATELY (reconnect #{})",
                     n
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                // Reconnect immediately — every millisecond without WS costs us
+                // 200ms extra latency per trade. Only add minimal backoff (100ms)
+                // to avoid CPU spin if the server is rejecting us.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         });
+    }
+
+    /// Wait up to `max_wait_ms` for the WS to reconnect.
+    /// Returns true if connected, false if timed out.
+    /// Called by the order routing path when WS is momentarily down.
+    pub async fn wait_for_reconnect(&self, max_wait_ms: u64) -> bool {
+        let start = std::time::Instant::now();
+        let check_interval = std::time::Duration::from_millis(5);
+        let deadline = std::time::Duration::from_millis(max_wait_ms);
+        while start.elapsed() < deadline {
+            if self.is_connected() {
+                ws_log!(
+                    "[BinanceTradeWS] Reconnected after {}ms wait",
+                    start.elapsed().as_millis()
+                );
+                return true;
+            }
+            tokio::time::sleep(check_interval).await;
+        }
+        false
     }
 
     /// Build and send a signed `account.status` probe to keep the connection warm.
@@ -247,7 +300,13 @@ impl BinanceTradeWs {
         }
         self.connected.store(true, Ordering::Relaxed);
         self.last_pong_ms.store(Self::epoch_ms_i64(), Ordering::Relaxed);
-        eprintln!("[BinanceTradeWS] ✅ Connected to Binance WS API");
+        let last_dc = self.last_disconnect_ms.load(Ordering::Relaxed);
+        let downtime = if last_dc > 0 {
+            Self::epoch_ms_i64() - last_dc
+        } else {
+            0
+        };
+        ws_log!("[BinanceTradeWS] ✅ Connected to Binance WS API (downtime={}ms)", downtime);
 
         // ── Ping task: send WebSocket-level pings every PING_INTERVAL_SECS ──
         let sink_for_ping = self.sink.clone();
@@ -270,7 +329,7 @@ impl BinanceTradeWs {
                     .as_millis() as i64;
                 let last_pong = last_pong_for_ping.load(Ordering::Relaxed);
                 if last_pong > 0 && (now - last_pong) > (PONG_TIMEOUT_SECS * 1000 + PING_INTERVAL_SECS as i64 * 1000) {
-                    eprintln!(
+                    ws_log!(
                         "[BinanceTradeWS] ⚠️ Zombie connection detected! Last pong was {}ms ago — forcing disconnect",
                         now - last_pong
                     );
@@ -287,7 +346,7 @@ impl BinanceTradeWs {
                 let mut sink_guard = sink_for_ping.lock().await;
                 if let Some(ref mut sink) = *sink_guard {
                     if sink.send(Message::Ping(vec![])).await.is_err() {
-                        eprintln!("[BinanceTradeWS] Ping send failed — connection likely dead");
+                        ws_log!("[BinanceTradeWS] Ping send failed — connection likely dead");
                         break;
                     }
                 }
@@ -341,11 +400,11 @@ impl BinanceTradeWs {
                     continue;
                 }
                 Ok(Message::Close(_)) => {
-                    eprintln!("[BinanceTradeWS] Server closed connection");
+                    ws_log!("[BinanceTradeWS] Server closed connection");
                     break;
                 }
                 Err(e) => {
-                    eprintln!("[BinanceTradeWS] Read error: {}", e);
+                    ws_log!("[BinanceTradeWS] Read error: {}", e);
                     break;
                 }
                 _ => continue,

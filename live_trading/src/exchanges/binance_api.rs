@@ -478,13 +478,40 @@ impl BinanceClient {
         self.pending_fills.insert(client_order_id.clone(), tx);
 
         // Try WebSocket API first (bypasses Cloudflare CDN, ~10-15ms vs ~210ms REST)
-        let ws_connected = self.trade_ws.is_connected();
-        eprintln!(
-            "[{}][BinanceAPI] Order routing: {} (WS connected={})",
-            Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-            if ws_connected { "WS_API (~10-15ms)" } else { "REST_FALLBACK (~30ms direct)" },
-            ws_connected
-        );
+        let mut ws_connected = self.trade_ws.is_connected();
+
+        // If WS is momentarily down (reconnecting), wait briefly for it to come back.
+        // WS reconnect loop runs every 100ms, so reconnect typically completes in 150-300ms.
+        // 300ms wait + 8ms WS order = 308ms worst case, vs 210ms REST.
+        // But in the common case: 150ms wait + 8ms = 158ms, beating REST.
+        if !ws_connected {
+            eprintln!(
+                "[{}][BinanceAPI] WS disconnected at trade time — waiting up to 500ms for reconnect",
+                Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            );
+            ws_connected = self.trade_ws.wait_for_reconnect(500).await;
+        }
+
+        // Log the routing decision to ws_debug.log for post-mortem analysis
+        {
+            let route = if ws_connected { "WS_API (~8ms)" } else { "REST_FALLBACK (~210ms)" };
+            let msg = format!(
+                "[BinanceAPI] Order routing: {} (WS connected={}) | {} {} {} qty={}",
+                route, ws_connected, side, symbol, if ws_connected { "via WS" } else { "via REST" }, quantity
+            );
+            let ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+            let line = format!("[{}] {}", ts, msg);
+            eprintln!("{}", line);
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("ws_debug.log")
+            {
+                let _ = writeln!(f, "{}", line);
+            }
+        }
+
         let order = if ws_connected {
             match self
                 .trade_ws
