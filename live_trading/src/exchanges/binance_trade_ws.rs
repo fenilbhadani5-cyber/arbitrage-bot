@@ -487,7 +487,7 @@ impl BinanceTradeWs {
         quantity: f64,
         client_order_id: &str,
         reduce_only: bool,
-        _price: Option<f64>,
+        price: Option<f64>,
     ) -> Result<WsOrderResult, String> {
         if !self.is_connected() {
             return Err("BinanceTradeWS not connected".to_string());
@@ -497,17 +497,32 @@ impl BinanceTradeWs {
         let ts = Self::timestamp_ms();
         let reduce_only_str = if reduce_only { "true" } else { "false" };
 
-        let order_type = "MARKET";
+        // Use LIMIT IOC when a protective price is provided (slippage protection).
+        // The IOC ensures the order fills immediately at or better than the limit price,
+        // or expires with 0 fill if the market has moved beyond the limit.
+        // Use MARKET only for close/reversal orders where guaranteed fill matters more.
+        let (order_type, price_str) = match price {
+            Some(p) => ("LIMIT", Some(format!("{:.8}", p))),
+            None => ("MARKET", None),
+        };
 
-        let query = format!(
-            "apiKey={}&newClientOrderId={}&quantity={:.8}&reduceOnly={}&side={}&symbol={}&timestamp={}&type={}",
-            self.api_key, client_order_id, quantity, reduce_only_str, side, symbol, ts, order_type
-        );
+        // Binance requires query params sorted alphabetically for signature
+        let query = if let Some(ref p) = price_str {
+            format!(
+                "apiKey={}&newClientOrderId={}&price={}&quantity={:.8}&reduceOnly={}&side={}&symbol={}&timeInForce=IOC&timestamp={}&type={}",
+                self.api_key, client_order_id, p, quantity, reduce_only_str, side, symbol, ts, order_type
+            )
+        } else {
+            format!(
+                "apiKey={}&newClientOrderId={}&quantity={:.8}&reduceOnly={}&side={}&symbol={}&timestamp={}&type={}",
+                self.api_key, client_order_id, quantity, reduce_only_str, side, symbol, ts, order_type
+            )
+        };
 
         let signature = self.sign(&query);
 
         // Build the WS API request frame
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "apiKey": self.api_key,
             "symbol": symbol,
             "side": side,
@@ -518,6 +533,10 @@ impl BinanceTradeWs {
             "timestamp": ts,
             "signature": signature,
         });
+        if let Some(ref p) = price_str {
+            params["price"] = serde_json::Value::String(p.clone());
+            params["timeInForce"] = serde_json::Value::String("IOC".to_string());
+        }
 
         let frame = serde_json::json!({
             "id": req_id,
@@ -532,8 +551,8 @@ impl BinanceTradeWs {
         self.pending.insert(req_id.clone(), tx);
 
         eprintln!(
-            "[BinanceTradeWS] Sending {} {} {} @ MARKET (reqId={}, clientId={})",
-            side, quantity, symbol, req_id, client_order_id
+            "[BinanceTradeWS] Sending {} {} {} @ {} (reqId={}, clientId={})",
+            side, quantity, symbol, order_type, req_id, client_order_id
         );
 
         // Send the frame

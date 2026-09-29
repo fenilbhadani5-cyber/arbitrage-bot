@@ -326,23 +326,33 @@ impl BinanceClient {
 
         let ts = Self::timestamp_ms();
         let reduce_only_str = if reduce_only { "true" } else { "false" };
-        // MARKET type is used for guaranteed execution.
-        let query = format!(
-            "symbol={}&side={}&type=MARKET&quantity={:.8}&newClientOrderId={}&reduceOnly={}&timestamp={}",
-            symbol, side, quantity, client_order_id, reduce_only_str, ts
-        );
+
+        // Use LIMIT IOC when a protective price is provided (slippage protection).
+        // MARKET only for close/reversal orders where guaranteed fill is more important.
+        let query = match price {
+            Some(p) => format!(
+                "symbol={}&side={}&type=LIMIT&timeInForce=IOC&price={:.8}&quantity={:.8}&newClientOrderId={}&reduceOnly={}&timestamp={}",
+                symbol, side, p, quantity, client_order_id, reduce_only_str, ts
+            ),
+            None => format!(
+                "symbol={}&side={}&type=MARKET&quantity={:.8}&newClientOrderId={}&reduceOnly={}&timestamp={}",
+                symbol, side, quantity, client_order_id, reduce_only_str, ts
+            ),
+        };
         let signature = self.sign(&query);
         let url = format!(
             "{}/fapi/v1/order?{}&signature={}",
             self.base_url, query, signature
         );
 
+        let order_type_label = if price.is_some() { "LIMIT IOC" } else { "MARKET" };
         eprintln!(
-            "[{}][BinanceAPI] Placing {} {} {} @ MARKET (clientId={}, count={}/300)",
+            "[{}][BinanceAPI] Placing {} {} {} @ {} (clientId={}, count={}/300)",
             Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
             side,
             quantity,
             symbol,
+            order_type_label,
             client_order_id,
             current_count
         );

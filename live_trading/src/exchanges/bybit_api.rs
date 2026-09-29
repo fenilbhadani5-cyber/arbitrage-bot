@@ -330,23 +330,37 @@ impl BybitClient {
     ) -> Result<BybitOrderResult, String> {
         let ts = Self::timestamp_ms();
 
+        // Use Limit IOC when a protective price is provided (slippage protection).
+        // Market only for close/reversal orders where guaranteed fill matters more.
+        let (order_type, time_in_force) = match price {
+            Some(_) => ("Limit", Some("IOC")),
+            None => ("Market", None),
+        };
+
         let mut body = serde_json::json!({
             "category": "linear",
             "symbol": symbol,
             "side": side,
-            "orderType": "Market",
+            "orderType": order_type,
             "qty": format!("{:.8}", quantity),
             "orderLinkId": order_link_id,
             "reduceOnly": reduce_only,
         });
+        if let Some(p) = price {
+            body["price"] = serde_json::Value::String(format!("{:.8}", p));
+        }
+        if let Some(tif) = time_in_force {
+            body["timeInForce"] = serde_json::Value::String(tif.to_string());
+        }
 
         let body_str = body.to_string();
         let signature = self.sign(ts, &body_str);
         let url = format!("{}/v5/order/create", self.base_url);
 
+        let order_type_label = if price.is_some() { "LIMIT IOC" } else { "MARKET" };
         eprintln!(
-            "[BybitAPI] Placing {} {} {} @ MARKET (linkId={})",
-            side, quantity, symbol, order_link_id
+            "[BybitAPI] Placing {} {} {} @ {} (linkId={})",
+            side, quantity, symbol, order_type_label, order_link_id
         );
 
         let mut req = self
