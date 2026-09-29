@@ -551,12 +551,43 @@ impl BinanceClient {
             ));
         }
 
-        // Await fill from private WS.
-        // For FILLED orders: WS event arrives in ~5-20ms — normal fast path.
-        // For NEW orders: Binance replies before matching (rare); we must wait longer.
-        // If it doesn't arrive in 200ms, the event was lost or WS is disconnected.
-        // Tokyo RTT to Binance is ~25ms, so 200ms = 8x headroom — ample for fills,
-        // while keeping the REST fallback fast (200ms + ~25ms REST = ~225ms worst case).
+        // ── INSTANT FILL PATH (~8ms) ──
+        // When the order was placed via WS API, the response ALREADY contains the
+        // fill data (avgPrice, executedQty, cumQuote) if status == "FILLED".
+        // Previously we ignored this and waited 200ms for a redundant notification
+        // from the private user data stream. This caused Trade 17 (LYN) to take
+        // 208ms on the Binance leg instead of 8ms, wiping out a 0.60% spread.
+        //
+        // Now: if the order response says FILLED with valid fill data, return
+        // immediately. Only fall through to the WS wait for NEW/PARTIALLY_FILLED
+        // orders where the response arrives before matching completes.
+        let avg_price = order.avgPrice.parse::<f64>().unwrap_or(0.0);
+        if order.status == "FILLED" && executed_qty > 0.0 && avg_price > 0.0 {
+            self.pending_fills.remove(&client_order_id);
+            let quote_qty = order.cumQuote.parse::<f64>().unwrap_or(avg_price * executed_qty);
+            let commission = quote_qty * 0.0005; // 0.05% taker fee
+            eprintln!(
+                "[BinanceAPI] ⚡ INSTANT FILL: order={} avgPrice={} qty={} quote={} fee={:.6} (skipped 200ms WS wait)",
+                order.orderId, avg_price, executed_qty, quote_qty, commission
+            );
+            return Ok(OrderFill {
+                order_id: order.orderId,
+                symbol: order.symbol,
+                side: order.side,
+                avg_price,
+                filled_qty: executed_qty,
+                quote_qty,
+                commission,
+                commission_asset: "USDT".to_string(),
+                realized_pnl: 0.0,
+                timestamp: order.updateTime,
+            });
+        }
+
+        // ── DEFERRED FILL PATH (for NEW / PARTIALLY_FILLED) ──
+        // Order was accepted but not yet fully matched. Wait for the private WS
+        // user data stream to deliver the ORDER_TRADE_UPDATE with final fill data.
+        // Timeout after 200ms; if it doesn't arrive, query REST as last resort.
         let ws_timeout = std::time::Duration::from_millis(200);
 
         match tokio::time::timeout(ws_timeout, rx).await {
