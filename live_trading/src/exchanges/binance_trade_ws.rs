@@ -11,8 +11,9 @@ use futures_util::{SinkExt, StreamExt};
 ///   1. Connect to `wss://ws-fapi.binance.com/ws-fapi/v1`
 ///   2. Each order message is self-authenticated (apiKey + timestamp + signature in params)
 ///   3. Response arrives on the same WS, matched by `id` field
-///   4. Ping every 3 minutes to keep connection alive (Binance disconnects after 5 min idle)
-///   5. Auto-reconnect on any disconnect
+///   4. Ping every 60s to keep connection alive (Binance disconnects after 5 min idle)
+///   5. Liveness probe every 120s via `account.status` to detect zombie connections
+///   6. Auto-reconnect on any disconnect with 500ms backoff
 ///
 /// IMPORTANT: Unlike Bybit's Trade WS (sign once on connect), Binance WS API
 /// requires HMAC-SHA256 signature per message. However, HMAC computation takes
@@ -20,7 +21,7 @@ use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{oneshot, Mutex};
@@ -31,6 +32,18 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// WebSocket API base URL for Binance USDS-M Futures.
 const WS_API_URL: &str = "wss://ws-fapi.binance.com/ws-fapi/v1";
+
+/// How often to send WebSocket pings (seconds).
+/// Binance disconnects after 5 min idle. We ping every 60s = 5x safety margin.
+const PING_INTERVAL_SECS: u64 = 60;
+
+/// How often to send a lightweight signed request (`account.status`) to keep the
+/// connection warm with real traffic and detect zombie connections (seconds).
+const LIVENESS_PROBE_INTERVAL_SECS: u64 = 120;
+
+/// If no pong is received within this many seconds after a ping, consider the
+/// connection dead and force reconnect.
+const PONG_TIMEOUT_SECS: i64 = 15;
 
 /// Response from a WS API order.place call.
 #[derive(Debug, Deserialize)]
@@ -102,6 +115,10 @@ pub struct BinanceTradeWs {
     pending: PendingRequestMap,
     connected: Arc<AtomicBool>,
     req_counter: Arc<AtomicU64>,
+    /// Epoch millis of the last pong received. Used to detect zombie connections.
+    last_pong_ms: Arc<AtomicI64>,
+    /// Total number of successful reconnections since process start.
+    reconnect_count: Arc<AtomicU64>,
 }
 
 impl BinanceTradeWs {
@@ -114,6 +131,8 @@ impl BinanceTradeWs {
             pending: Arc::new(DashMap::new()),
             connected: Arc::new(AtomicBool::new(false)),
             req_counter: Arc::new(AtomicU64::new(1)),
+            last_pong_ms: Arc::new(AtomicI64::new(0)),
+            reconnect_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -146,8 +165,17 @@ impl BinanceTradeWs {
             .as_millis() as u64
     }
 
+    /// Current epoch millis (i64 for AtomicI64 storage).
+    #[inline]
+    fn epoch_ms_i64() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    }
+
     /// Spawn the WebSocket connection loop as a background task.
-    /// Automatically reconnects on disconnect with a 1-second backoff.
+    /// Automatically reconnects on disconnect with 500ms backoff.
     pub fn spawn_connection(&self) {
         let handle = self.clone();
         tokio::spawn(async move {
@@ -155,10 +183,41 @@ impl BinanceTradeWs {
                 eprintln!("[BinanceTradeWS] Connecting to {}...", WS_API_URL);
                 handle.run_connection().await;
                 handle.connected.store(false, Ordering::Relaxed);
-                eprintln!("[BinanceTradeWS] Disconnected — reconnecting in 1s...");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let n = handle.reconnect_count.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!(
+                    "[BinanceTradeWS] Disconnected — reconnecting in 500ms (reconnect #{})",
+                    n
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         });
+    }
+
+    /// Build and send a signed `account.status` probe to keep the connection warm.
+    /// This is a lightweight read-only request that verifies the WS is alive end-to-end.
+    async fn send_liveness_probe(sink: &WsSink, api_key: &str, api_secret: &str, req_id: &str) {
+        let ts = Self::timestamp_ms();
+        let query = format!("apiKey={}&timestamp={}", api_key, ts);
+        let mut mac = HmacSha256::new_from_slice(api_secret.as_bytes()).expect("HMAC error");
+        mac.update(query.as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+
+        let frame = serde_json::json!({
+            "id": req_id,
+            "method": "account.status",
+            "params": {
+                "apiKey": api_key,
+                "timestamp": ts,
+                "signature": signature,
+            }
+        });
+
+        let mut sink_guard = sink.lock().await;
+        if let Some(ref mut sink) = *sink_guard {
+            if let Err(e) = sink.send(Message::Text(frame.to_string())).await {
+                eprintln!("[BinanceTradeWS] Liveness probe send failed: {}", e);
+            }
+        }
     }
 
     /// Run a single WebSocket connection lifecycle.
@@ -187,29 +246,85 @@ impl BinanceTradeWs {
             *sink_guard = Some(write);
         }
         self.connected.store(true, Ordering::Relaxed);
-        eprintln!("[BinanceTradeWS] Connected to Binance WS API");
+        self.last_pong_ms.store(Self::epoch_ms_i64(), Ordering::Relaxed);
+        eprintln!("[BinanceTradeWS] ✅ Connected to Binance WS API");
 
-        // Spawn a ping task to keep the connection alive (every 3 minutes)
+        // ── Ping task: send WebSocket-level pings every PING_INTERVAL_SECS ──
         let sink_for_ping = self.sink.clone();
         let connected_for_ping = self.connected.clone();
+        let last_pong_for_ping = self.last_pong_ms.clone();
         let ping_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(180));
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(PING_INTERVAL_SECS));
+            interval.tick().await; // Skip immediate first tick
             loop {
                 interval.tick().await;
                 if !connected_for_ping.load(Ordering::Relaxed) {
                     break;
                 }
+
+                // Check for zombie connection: if last pong is too old, force disconnect
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64;
+                let last_pong = last_pong_for_ping.load(Ordering::Relaxed);
+                if last_pong > 0 && (now - last_pong) > (PONG_TIMEOUT_SECS * 1000 + PING_INTERVAL_SECS as i64 * 1000) {
+                    eprintln!(
+                        "[BinanceTradeWS] ⚠️ Zombie connection detected! Last pong was {}ms ago — forcing disconnect",
+                        now - last_pong
+                    );
+                    // Close the sink to force the read loop to exit
+                    let mut sink_guard = sink_for_ping.lock().await;
+                    if let Some(ref mut sink) = *sink_guard {
+                        let _ = sink.close().await;
+                    }
+                    *sink_guard = None;
+                    connected_for_ping.store(false, Ordering::Relaxed);
+                    break;
+                }
+
                 let mut sink_guard = sink_for_ping.lock().await;
                 if let Some(ref mut sink) = *sink_guard {
                     if sink.send(Message::Ping(vec![])).await.is_err() {
-                        eprintln!("[BinanceTradeWS] Ping failed");
+                        eprintln!("[BinanceTradeWS] Ping send failed — connection likely dead");
                         break;
                     }
                 }
             }
         });
 
-        // Read loop — dispatch responses to pending request channels
+        // ── Liveness probe task: send `account.status` every LIVENESS_PROBE_INTERVAL_SECS ──
+        let sink_for_probe = self.sink.clone();
+        let connected_for_probe = self.connected.clone();
+        let api_key_for_probe = self.api_key.clone();
+        let api_secret_for_probe = self.api_secret.clone();
+        let probe_counter = self.req_counter.clone();
+        let probe_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                LIVENESS_PROBE_INTERVAL_SECS,
+            ));
+            interval.tick().await; // Skip immediate first tick
+            loop {
+                interval.tick().await;
+                if !connected_for_probe.load(Ordering::Relaxed) {
+                    break;
+                }
+                let req_id = format!(
+                    "probe_{}",
+                    probe_counter.fetch_add(1, Ordering::Relaxed)
+                );
+                Self::send_liveness_probe(
+                    &sink_for_probe,
+                    &api_key_for_probe,
+                    &api_secret_for_probe,
+                    &req_id,
+                )
+                .await;
+            }
+        });
+
+        // ── Read loop — dispatch responses to pending request channels ──
         while let Some(msg) = read.next().await {
             let text = match msg {
                 Ok(Message::Text(t)) => t,
@@ -220,7 +335,11 @@ impl BinanceTradeWs {
                     }
                     continue;
                 }
-                Ok(Message::Pong(_)) => continue,
+                Ok(Message::Pong(_)) => {
+                    // Update last pong timestamp for zombie detection
+                    self.last_pong_ms.store(Self::epoch_ms_i64(), Ordering::Relaxed);
+                    continue;
+                }
                 Ok(Message::Close(_)) => {
                     eprintln!("[BinanceTradeWS] Server closed connection");
                     break;
@@ -236,6 +355,20 @@ impl BinanceTradeWs {
             match serde_json::from_str::<WsApiResponse>(&text) {
                 Ok(resp) => {
                     let req_id = resp.id.clone();
+
+                    // Liveness probe responses — just confirm we're alive, don't dispatch
+                    if req_id.starts_with("probe_") {
+                        if resp.status != 200 {
+                            eprintln!(
+                                "[BinanceTradeWS] Liveness probe got status {} (expected 200)",
+                                resp.status
+                            );
+                        }
+                        // Update pong time since we got a real response
+                        self.last_pong_ms.store(Self::epoch_ms_i64(), Ordering::Relaxed);
+                        continue;
+                    }
+
                     if let Some((_, sender)) = self.pending.remove(&req_id) {
                         if resp.status == 200 {
                             if let Some(result) = resp.result {
@@ -267,6 +400,7 @@ impl BinanceTradeWs {
 
         // Cleanup
         ping_task.abort();
+        probe_task.abort();
         self.connected.store(false, Ordering::Relaxed);
         {
             let mut sink_guard = self.sink.lock().await;
@@ -294,7 +428,7 @@ impl BinanceTradeWs {
         quantity: f64,
         client_order_id: &str,
         reduce_only: bool,
-        price: Option<f64>,
+        _price: Option<f64>,
     ) -> Result<WsOrderResult, String> {
         if !self.is_connected() {
             return Err("BinanceTradeWS not connected".to_string());
