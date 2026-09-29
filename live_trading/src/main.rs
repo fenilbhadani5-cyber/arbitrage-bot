@@ -475,6 +475,17 @@ async fn main() {
             .await;
     });
 
+    // ── Background Leverage Pre-warm ──
+    // Pre-configures 10x leverage on both Binance & Bybit for all tradeable symbols in the background.
+    // Prevents missed trades and eliminates 150-300ms REST latency on the first trade of every coin.
+    let pw_engine = engine.clone();
+    let pw_info = exchange_info.clone();
+    let pw_bin = binance_client.clone();
+    let pw_byb = bybit_client.clone();
+    tokio::spawn(async move {
+        live_trading::prewarm_leverage(pw_engine, pw_info, pw_bin, pw_byb).await;
+    });
+
     // ── Renderer runs until user presses 'q' or Ctrl+C ──
     let renderer_store = store.clone();
     let renderer_status = status.clone();

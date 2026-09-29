@@ -128,9 +128,31 @@ impl LiveTradingEngine {
             closed_count: 0,
             winning_trades: 0,
             losing_trades: 0,
-            leverage_cache: HashMap::new(),
+            leverage_cache: Self::load_leverage_cache(),
             emergency_halt: false,
             exchange_info,
+        }
+    }
+
+    /// Load cached leverage mappings from disk to persist across bot restarts.
+    pub fn load_leverage_cache() -> HashMap<String, (u32, u32)> {
+        if let Ok(data) = std::fs::read_to_string(crate::config::LEVERAGE_CACHE_PATH) {
+            if let Ok(cache) = serde_json::from_str::<HashMap<String, (u32, u32)>>(&data) {
+                eprintln!(
+                    "[LiveTrading] Loaded {} cached symbol leverages from {}",
+                    cache.len(),
+                    crate::config::LEVERAGE_CACHE_PATH
+                );
+                return cache;
+            }
+        }
+        HashMap::new()
+    }
+
+    /// Save current leverage cache to disk.
+    pub fn save_leverage_cache(&self) {
+        if let Ok(json) = serde_json::to_string_pretty(&self.leverage_cache) {
+            let _ = std::fs::write(crate::config::LEVERAGE_CACHE_PATH, json);
         }
     }
 
@@ -579,7 +601,7 @@ impl LiveTradingEngine {
         }
 
         // Strict executable spread check from order book — NEVER fall back to last_price!
-        let buy_ask = match buy_book.best_ask {
+        let mut buy_ask = match buy_book.best_ask {
             Some(a) if a > 0.0 => a,
             _ => {
                 self.log_missed(
@@ -598,7 +620,7 @@ impl LiveTradingEngine {
                 return false;
             }
         };
-        let sell_bid = match sell_book.best_bid {
+        let mut sell_bid = match sell_book.best_bid {
             Some(b) if b > 0.0 => b,
             _ => {
                 self.log_missed(
@@ -635,7 +657,7 @@ impl LiveTradingEngine {
             );
             return false;
         }
-        let book_spread_pct = ((sell_bid - buy_ask) / buy_ask) * 100.0;
+        let mut book_spread_pct = ((sell_bid - buy_ask) / buy_ask) * 100.0;
         if book_spread_pct < dynamic_entry {
             self.log_missed(
                 coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
@@ -774,7 +796,7 @@ impl LiveTradingEngine {
         let qty_bybit = self
             .round_quantity_exact(&symbol, Exchange::Bybit, raw_quantity, buy_ask)
             .await;
-        let quantity = qty_binance.min(qty_bybit);
+        let mut quantity = qty_binance.min(qty_bybit);
 
         if quantity <= 0.0 {
             self.log_missed(
@@ -860,7 +882,7 @@ impl LiveTradingEngine {
 
         if !skip_leverage {
             eprintln!(
-                "[LiveTrading] Setting leverage {}x on both exchanges for {} (blocking first trade)",
+                "[LiveTrading] Setting leverage {}x on both exchanges for {} (on-demand)",
                 leverage, symbol
             );
 
@@ -868,28 +890,109 @@ impl LiveTradingEngine {
                 self.binance_client.set_leverage(&symbol, leverage),
                 self.bybit_client.set_leverage(&symbol, leverage)
             );
-            if let Err(e) = bin_result {
+            if let Err(e) = &bin_result {
                 eprintln!(
                     "[LiveTrading] WARNING: Failed to set leverage on Binance for {}: {}",
                     symbol, e
                 );
             }
-            if let Err(e) = byb_result {
+            if let Err(e) = &byb_result {
                 eprintln!(
                     "[LiveTrading] WARNING: Failed to set leverage on Bybit for {}: {}",
                     symbol, e
                 );
             }
 
-            self.leverage_cache
-                .insert(symbol.clone(), (leverage, leverage));
-                
-            // Abort this trade because prices are likely stale now after the REST API calls
-            self.log_missed(
-                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
-                "LEVERAGE_SETUP: Initialized leverage for coin, skipping this trade to ensure fresh prices.".to_string(),
-            );
-            return false;
+            if bin_result.is_ok() && byb_result.is_ok() {
+                self.leverage_cache
+                    .insert(symbol.clone(), (leverage, leverage));
+                self.save_leverage_cache();
+            }
+
+            // DO NOT ABORT! Real-time WebSocket feeds have been updating the price store continuously.
+            // Re-verify fresh prices and if spread is still profitable, EXECUTE IMMEDIATELY!
+            if let Some(fresh_prices) = price_store.get(coin) {
+                let bin_fresh = fresh_prices
+                    .binance_book_updated
+                    .map(|ts| ts.elapsed().as_millis() <= MAX_BOOK_AGE_MILLIS)
+                    .unwrap_or(false);
+                let byb_fresh = fresh_prices
+                    .bybit_book_updated
+                    .map(|ts| ts.elapsed().as_millis() <= MAX_BOOK_AGE_MILLIS)
+                    .unwrap_or(false);
+
+                if !bin_fresh || !byb_fresh {
+                    self.log_missed(
+                        coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
+                        "LEVERAGE_SETUP: Book prices became stale during leverage setup, waiting for next tick.".to_string(),
+                    );
+                    return false;
+                }
+
+                let fresh_buy_book = get_order_book(&fresh_prices, buy_exchange);
+                let fresh_sell_book = get_order_book(&fresh_prices, sell_exchange);
+
+                if let (Some(fresh_ask), Some(fresh_bid)) = (fresh_buy_book.best_ask, fresh_sell_book.best_bid) {
+                    if fresh_ask <= 0.0 || fresh_bid <= 0.0 || fresh_ask >= fresh_bid {
+                        self.log_missed(
+                            coin, buy_exchange, sell_exchange, fresh_ask, fresh_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
+                            "LEVERAGE_SETUP: Orderbook crossed or empty after leverage setup.".to_string(),
+                        );
+                        return false;
+                    }
+
+                    let fresh_spread = ((fresh_bid - fresh_ask) / fresh_ask) * 100.0;
+                    if fresh_spread < dynamic_entry {
+                        self.log_missed(
+                            coin, buy_exchange, sell_exchange, fresh_ask, fresh_bid, fresh_spread, dynamic_entry, dynamic_exit, spread_velocity, Some(fresh_spread),
+                            format!("LEVERAGE_SETUP: Spread collapsed from {:.3}% to {:.3}% (< {:.3}%) during leverage setup.", book_spread_pct, fresh_spread, dynamic_entry),
+                        );
+                        return false;
+                    }
+
+                    // Spread is STILL valid and profitable!
+                    eprintln!(
+                        "[LiveTrading] ⚡ Leverage set for {} and spread STILL PROFITABLE ({:.3}% >= {:.3}%) — PROCEEDING WITH TRADE!",
+                        coin, fresh_spread, dynamic_entry
+                    );
+
+                    // Update prices & spread
+                    buy_ask = fresh_ask;
+                    sell_bid = fresh_bid;
+                    book_spread_pct = fresh_spread;
+
+                    // Recalculate quantities with fresh prices and fresh depth
+                    let fresh_ask_qty = fresh_buy_book.best_ask_qty.unwrap_or(0.0);
+                    let fresh_bid_qty = fresh_sell_book.best_bid_qty.unwrap_or(0.0);
+                    let fresh_buy_liq = buy_ask * fresh_ask_qty;
+                    let fresh_sell_liq = sell_bid * fresh_bid_qty;
+                    if fresh_buy_liq < trade_usdt { trade_usdt = fresh_buy_liq; }
+                    if fresh_sell_liq < trade_usdt { trade_usdt = fresh_sell_liq; }
+
+                    if trade_usdt < 5.0 {
+                        self.log_missed(
+                            coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
+                            format!("LOW_LIQUIDITY: Orderbook depth allows only ${:.2} trade size (< $5.00 min) after leverage setup", trade_usdt),
+                        );
+                        return false;
+                    }
+
+                    let buy_quantity = trade_usdt / buy_ask;
+                    let sell_quantity = trade_usdt / sell_bid;
+                    let raw_quantity = buy_quantity.min(sell_quantity);
+                    let qty_binance = self.round_quantity_exact(&symbol, Exchange::Binance, raw_quantity, buy_ask).await;
+                    let qty_bybit = self.round_quantity_exact(&symbol, Exchange::Bybit, raw_quantity, buy_ask).await;
+                    quantity = qty_binance.min(qty_bybit);
+
+                    if quantity <= 0.0 {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
         }
 
         // ── Unified fill struct for normalizing data from both exchanges ──
@@ -2682,4 +2785,92 @@ pub async fn run_trading_loop(
             }
         }
     }
+}
+
+/// Pre-warms leverage to FIXED_LEVERAGE (10x) on Binance and Bybit for all tradeable symbols.
+/// Runs in a background task at startup at a polite rate (~6.6 req/sec).
+/// Saves results to leverage_cache.json so on future bot starts, all symbols are already cached.
+pub async fn prewarm_leverage(
+    engine: SharedTradingEngine,
+    exchange_info: ExchangeInfoCache,
+    binance: BinanceClient,
+    bybit: BybitClient,
+) {
+    // Wait 3 seconds for initial feeds/startup to stabilize
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Get all common symbols (present in both Binance and Bybit)
+    let bin_symbols: std::collections::HashSet<String> = {
+        let bin = exchange_info.binance.read().await;
+        bin.keys().cloned().collect()
+    };
+    let byb_symbols: std::collections::HashSet<String> = {
+        let byb = exchange_info.bybit.read().await;
+        byb.keys().cloned().collect()
+    };
+
+    let mut common: Vec<String> = bin_symbols
+        .intersection(&byb_symbols)
+        .cloned()
+        .collect();
+    common.sort();
+
+    // Filter out symbols already in cache
+    let uncached: Vec<String> = {
+        let eng = engine.lock().await;
+        common
+            .into_iter()
+            .filter(|s| {
+                eng.leverage_cache
+                    .get(s)
+                    .map(|c| c.0 == FIXED_LEVERAGE && c.1 == FIXED_LEVERAGE)
+                    .unwrap_or(false) == false
+            })
+            .collect()
+    };
+
+    if uncached.is_empty() {
+        eprintln!("[LeveragePrewarm] ✅ All common symbols already have leverage cached.");
+        return;
+    }
+
+    eprintln!(
+        "[LeveragePrewarm] 🚀 Starting background leverage pre-warm for {} uncached symbols ({}x leverage)...",
+        uncached.len(),
+        FIXED_LEVERAGE
+    );
+
+    let mut count = 0;
+    for symbol in uncached {
+        // Rate limit: wait 150ms between symbols (~6.6 symbols/sec)
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let (bin_res, byb_res) = tokio::join!(
+            binance.set_leverage(&symbol, FIXED_LEVERAGE),
+            bybit.set_leverage(&symbol, FIXED_LEVERAGE)
+        );
+
+        if bin_res.is_ok() && byb_res.is_ok() {
+            let mut eng = engine.lock().await;
+            eng.leverage_cache
+                .insert(symbol.clone(), (FIXED_LEVERAGE, FIXED_LEVERAGE));
+            count += 1;
+            if count % 25 == 0 {
+                eng.save_leverage_cache();
+                eprintln!(
+                    "[LeveragePrewarm] Pre-warmed {} symbols with {}x leverage",
+                    count, FIXED_LEVERAGE
+                );
+            }
+        }
+    }
+
+    {
+        let eng = engine.lock().await;
+        eng.save_leverage_cache();
+    }
+    eprintln!(
+        "[LeveragePrewarm] ✅ Pre-warming complete! Configured {} symbols with {}x leverage.",
+        count, FIXED_LEVERAGE
+    );
 }

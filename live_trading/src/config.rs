@@ -68,6 +68,9 @@ pub const MISSED_TRADES_LOG_PATH: &str = "missed_trades.log";
 /// Path for the missed trades JSONL file (machine-readable structured JSON lines).
 pub const MISSED_TRADES_JSONL_PATH: &str = "missed_trades.jsonl";
 
+/// Path for the cached symbol leverage file (persists across bot restarts).
+pub const LEVERAGE_CACHE_PATH: &str = "leverage_cache.json";
+
 // --- Dynamic Spread-Threshold System v2.0 Configuration ---
 
 #[derive(Debug, Clone)]
