@@ -187,7 +187,7 @@ impl BinanceClient {
             api_secret,
             http_fast,
             http_slow,
-            base_url: "https://fapi2.binance.com".to_string(),
+            base_url: "https://fapi.binance.com".to_string(),
             pending_fills,
             live_balance,
             order_count_10s,

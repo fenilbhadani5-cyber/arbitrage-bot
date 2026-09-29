@@ -181,7 +181,7 @@ impl BybitClient {
             api_secret,
             http_fast,
             http_slow,
-            base_url: "https://api-d.bybit.com".to_string(),
+            base_url: "https://api.bybit.com".to_string(),
             recv_window: "5000".to_string(),
             pending_fills,
             live_balance,
