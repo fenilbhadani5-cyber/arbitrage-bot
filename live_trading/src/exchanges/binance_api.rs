@@ -131,7 +131,7 @@ pub struct OrderFill {
 impl BinanceClient {
     /// Create a new Binance Futures API client.
     /// Uses HTTP/2 with a fast 3s timeout for orders and a slower 8s timeout for account queries.
-    /// Uses fapi2.binance.com — the fastest direct-cluster endpoint from Tokyo (15ms vs 29ms on fapi.binance.com).
+    /// Uses fapi.binance.com — the official Binance Futures REST endpoint.
     pub fn new(
         api_key: String,
         api_secret: String,
