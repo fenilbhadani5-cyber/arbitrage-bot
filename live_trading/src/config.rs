@@ -27,7 +27,7 @@ pub const MAX_SPREAD_THRESHOLD: f64 = 10.0;
 pub const MAX_BOOK_AGE_MILLIS: u128 = 400;
 
 /// Maximum acceptable slippage % between quoted orderbook price and executed fill price.
-pub const MAX_ALLOWED_SLIPPAGE_PCT: f64 = 0.35;
+pub const MAX_ALLOWED_SLIPPAGE_PCT: f64 = 0.45;
 
 /// Spread % at which to CLOSE an open position (spread has converged).
 pub const EXIT_SPREAD_THRESHOLD: f64 = 0.3;

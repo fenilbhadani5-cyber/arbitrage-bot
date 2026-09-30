@@ -1106,7 +1106,7 @@ impl LiveTradingEngine {
         // This ensures wider spreads get more breathing room for stale books (~180ms),
         // while narrow spreads stay tight to protect profitability.
         // Example: 0.875% spread → 0.26% slip, 0.65% spread → 0.20% slip, 1.5% → 0.35% slip (capped)
-        let slip_pct = ((spread * 0.30) / 100.0).clamp(0.0015, MAX_ALLOWED_SLIPPAGE_PCT / 100.0);
+        let slip_pct = ((spread * 0.45) / 100.0).clamp(0.0015, MAX_ALLOWED_SLIPPAGE_PCT / 100.0);
         let raw_buy_price = buy_ask * (1.0 + slip_pct);
         let raw_sell_price = sell_bid * (1.0 - slip_pct);
         // Round limit prices to exchange tick size to prevent "Price not increased by tick size" errors
@@ -2661,7 +2661,7 @@ pub async fn run_trading_loop(
                     Exchange::Bybit => prices.bybit_book_epoch_ms,
                 };
                 let book_epoch_ms = match (buy_epoch, sell_epoch) {
-                    (Some(b), Some(s)) => Some(b.min(s)),
+                    (Some(b), Some(s)) => Some(b.max(s)),
                     (Some(b), None) => Some(b),
                     (None, Some(s)) => Some(s),
                     (None, None) => None,
