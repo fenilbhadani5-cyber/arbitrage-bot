@@ -1,7 +1,6 @@
 use crate::latency::TradeLatency;
 use crate::price_store::Exchange;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 
 /// Whether this record represents an OPEN or CLOSE of an arbitrage position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,17 +157,37 @@ fn default_trade_type() -> TradeType {
     TradeType::Close
 }
 
+static LIVE_TRADE_LOG_TX: std::sync::OnceLock<tokio::sync::mpsc::Sender<(String, String)>> = std::sync::OnceLock::new();
+
+/// Start the background log flusher if not already running.
+pub fn ensure_trade_log_flusher_running() {
+    LIVE_TRADE_LOG_TX.get_or_init(|| {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, String)>(1024);
+        tokio::spawn(async move {
+            use std::io::Write;
+            while let Some((path, json)) = rx.recv().await {
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
+                    let _ = writeln!(file, "{}", json);
+                }
+            }
+        });
+        tx
+    });
+}
+
 /// Save a single trade record to the journal file (append as JSON line).
 pub fn save_trade(record: &TradeRecord, path: &str) -> std::io::Result<()> {
     let json = serde_json::to_string(record)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-
-    writeln!(file, "{}", json)?;
+    if let Some(tx) = LIVE_TRADE_LOG_TX.get() {
+        let _ = tx.try_send((path.to_string(), json));
+    }
+    
     Ok(())
 }
 

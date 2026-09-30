@@ -38,23 +38,43 @@ const WS_API_URL: &str = "wss://ws-fapi.binance.com/ws-fapi/v1";
 /// so we can diagnose connection drops even with the TUI active.
 const WS_LOG_PATH: &str = "ws_debug.log";
 
-/// Write a timestamped line to both stderr and the WS debug log file.
-/// This ensures WS diagnostics are always available even when the TUI
-/// overwrites the terminal.
+/// Sender half of the background WS log channel.
+/// Send a pre-formatted line here; the background flush task writes it to disk.
+/// `try_send` is used so the hot order path is never blocked if the channel is full.
+pub(super) static WS_LOG_TX: std::sync::OnceLock<tokio::sync::mpsc::Sender<String>> = std::sync::OnceLock::new();
+
+/// Start the background WS log flusher if not already running.
+/// Must be called once from within a tokio runtime (e.g. in `new()` or `spawn_connection()`).
+pub(super) fn ensure_ws_log_flusher_running() {
+    WS_LOG_TX.get_or_init(|| {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(512);
+        tokio::spawn(async move {
+            use std::io::Write;
+            while let Some(line) = rx.recv().await {
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(WS_LOG_PATH)
+                {
+                    let _ = writeln!(f, "{}", line);
+                }
+            }
+        });
+        tx
+    });
+}
+
+/// Write a timestamped line to stderr and queue it for async disk write.
+/// The disk write is performed by a background task — the caller is NEVER blocked.
 macro_rules! ws_log {
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);
         let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
         let line = format!("[{}] {}", ts, msg);
         eprintln!("{}", line);
-        // Best-effort append to log file
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(WS_LOG_PATH)
-        {
-            let _ = writeln!(f, "{}", line);
+        // Non-blocking enqueue for background disk write
+        if let Some(tx) = WS_LOG_TX.get() {
+            let _ = tx.try_send(line);
         }
     }};
 }
@@ -263,6 +283,8 @@ impl BinanceTradeWs {
     /// Spawn the WebSocket connection loop as a background task.
     /// Automatically reconnects on disconnect with adaptive backoff.
     pub fn spawn_connection(&self) {
+        // Ensure the background log flusher is running before any ws_log! calls.
+        ensure_ws_log_flusher_running();
         let handle = self.clone();
         tokio::spawn(async move {
             loop {
@@ -645,7 +667,9 @@ impl BinanceTradeWs {
         self.pending.insert(req_id.clone(), tx);
 
         let send_t0 = std::time::Instant::now();
-        ws_log!(
+        // Use eprintln only (no disk I/O) on the hot order-send path to avoid
+        // blocking the executor with synchronous file writes.
+        eprintln!(
             "[BinanceTradeWS] Sending {} {} {} @ {} (reqId={}, clientId={})",
             side, quantity, symbol, order_type, req_id, client_order_id
         );

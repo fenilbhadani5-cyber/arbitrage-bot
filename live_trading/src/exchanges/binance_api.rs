@@ -493,42 +493,38 @@ impl BinanceClient {
         self.pending_fills.insert(client_order_id.clone(), tx);
 
         // Try WebSocket API first (bypasses Cloudflare CDN, ~10-15ms vs ~210ms REST)
-        let mut ws_connected = self.trade_ws.is_connected();
+        let ws_connected = self.trade_ws.is_connected();
 
-        // If WS is momentarily down (reconnecting), wait briefly for it to come back.
-        // WS reconnect loop runs every 100ms, so reconnect typically completes in 150-300ms.
-        // 300ms wait + 8ms WS order = 308ms worst case, vs 210ms REST.
-        // But in the common case: 150ms wait + 8ms = 158ms, beating REST.
+        // If WS is down, fall through to REST immediately.
+        // Waiting for WS reconnect (100-300ms) + then placing via REST (~200ms) is always
+        // slower than just going to REST directly. The WS reconnect loop runs in the
+        // background and will be available for the next trade opportunity.
         if !ws_connected {
             eprintln!(
-                "[{}][BinanceAPI] ⚠️ WS disconnected at trade time — waiting up to 500ms for reconnect (failures={}, last_connect={}ms ago)",
+                "[{}][BinanceAPI] ⚠️ WS disconnected at trade time — using REST fallback immediately (failures={}, last_connect={}ms ago)",
                 Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
                 self.trade_ws.consecutive_failures(),
                 self.trade_ws.last_connect_age_ms(),
             );
-            ws_connected = self.trade_ws.wait_for_reconnect(500).await;
+            // Do NOT wait for WS reconnect here — a 500ms reconnect wait + REST is always
+            // slower than just going to REST directly (~200ms). The reconnect loop is
+            // running in the background and will restore WS for the next trade.
         }
 
-        // Log the routing decision to ws_debug.log for post-mortem analysis
+        // Log the routing decision for post-mortem analysis (non-blocking channel send).
         {
             let route = if ws_connected { "WS_API (~8ms)" } else { "REST_FALLBACK (~200ms) ⚠️ SLOW" };
             let failures = self.trade_ws.consecutive_failures();
             let reconnects = self.trade_ws.total_reconnects();
             let msg = format!(
-                "[BinanceAPI] Order routing: {} (WS connected={}, failures={}, reconnects={}) | {} {} {} qty={}",
-                route, ws_connected, failures, reconnects, side, symbol,
-                if ws_connected { "via WS" } else { "via REST" }, quantity
+                "[{}] [BinanceAPI] Order routing: {} (WS connected={}, failures={}, reconnects={}) | {} {} qty={}",
+                Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                route, ws_connected, failures, reconnects, side, symbol, quantity
             );
-            let ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
-            let line = format!("[{}] {}", ts, msg);
-            eprintln!("{}", line);
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("ws_debug.log")
-            {
-                let _ = writeln!(f, "{}", line);
+            eprintln!("{}", msg);
+            // Async disk write — non-blocking, uses background flusher task
+            if let Some(tx) = super::binance_trade_ws::WS_LOG_TX.get() {
+                let _ = tx.try_send(msg);
             }
         }
 

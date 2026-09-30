@@ -1,9 +1,7 @@
 use chrono::{DateTime, Utc};
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::Write;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -41,34 +39,47 @@ static THROTTLE_MAP: Mutex<Option<HashMap<String, (String, Instant)>>> = Mutex::
 /// Minimum seconds between logging the same coin for the same reason category.
 const THROTTLE_SECS: u64 = 5;
 
-lazy_static! {
-    static ref LOG_FILE_TXT: Mutex<std::fs::File> = Mutex::new(
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(MISSED_TRADES_LOG_PATH)
-            .unwrap_or_else(|_| {
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("missed_trades.log")
-                    .expect("Failed to open missed_trades.log")
-            })
-    );
+static MISSED_LOG_TX: std::sync::OnceLock<tokio::sync::mpsc::Sender<(String, Option<String>)>> = std::sync::OnceLock::new();
 
-    static ref LOG_FILE_JSON: Mutex<std::fs::File> = Mutex::new(
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(MISSED_TRADES_JSONL_PATH)
-            .unwrap_or_else(|_| {
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("missed_trades.jsonl")
-                    .expect("Failed to open missed_trades.jsonl")
-            })
-    );
+/// Start the background log flusher if not already running.
+pub fn ensure_missed_log_flusher_running() {
+    MISSED_LOG_TX.get_or_init(|| {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Option<String>)>(2048);
+        tokio::spawn(async move {
+            use std::io::Write;
+            let mut file_txt = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(MISSED_TRADES_LOG_PATH)
+                .unwrap_or_else(|_| {
+                    OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("missed_trades.log")
+                        .expect("Failed to open missed_trades.log")
+                });
+                
+            let mut file_json = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(MISSED_TRADES_JSONL_PATH)
+                .unwrap_or_else(|_| {
+                    OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("missed_trades.jsonl")
+                        .expect("Failed to open missed_trades.jsonl")
+                });
+
+            while let Some((text, json_opt)) = rx.recv().await {
+                let _ = file_txt.write_all(text.as_bytes());
+                if let Some(json) = json_opt {
+                    let _ = writeln!(file_json, "{}", json);
+                }
+            }
+        });
+        tx
+    });
 }
 
 /// Extract reason category (e.g. "COOLDOWN" from "COOLDOWN: remaining 15s")
@@ -183,16 +194,11 @@ pub fn log_missed_trade(record: &MissedTradeRecord) {
         latency_str,
     );
 
-    // Open human-readable log (with local fallback if absolute path fails)
-    if let Ok(mut file) = LOG_FILE_TXT.lock() {
-        let _ = file.write_all(text_line.as_bytes());
-    }
-
-    // 2. Machine-readable JSONL format
-    if let Ok(json) = serde_json::to_string(record) {
-        if let Ok(mut file) = LOG_FILE_JSON.lock() {
-            let _ = writeln!(file, "{}", json);
-        }
+    let json_str = serde_json::to_string(record).ok();
+    
+    // Non-blocking enqueue for background disk write
+    if let Some(tx) = MISSED_LOG_TX.get() {
+        let _ = tx.try_send((text_line, json_str));
     }
 }
 

@@ -197,6 +197,10 @@ async fn main() {
     // ── Validate Dynamic Config ──
     crate::config::DynamicSpreadConfig::default().validate();
 
+    // ── Start async log flushers ──
+    crate::missed_trade_logger::ensure_missed_log_flusher_running();
+    crate::trade_journal::ensure_trade_log_flusher_running();
+
     // ── Load keys from keys.env file if present ──
     load_env_file();
 

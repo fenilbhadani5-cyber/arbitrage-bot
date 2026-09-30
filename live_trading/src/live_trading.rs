@@ -152,7 +152,9 @@ impl LiveTradingEngine {
     /// Save current leverage cache to disk.
     pub fn save_leverage_cache(&self) {
         if let Ok(json) = serde_json::to_string_pretty(&self.leverage_cache) {
-            let _ = std::fs::write(crate::config::LEVERAGE_CACHE_PATH, json);
+            tokio::spawn(async move {
+                let _ = tokio::fs::write(crate::config::LEVERAGE_CACHE_PATH, json).await;
+            });
         }
     }
 
