@@ -595,15 +595,19 @@ impl BinanceTradeWs {
             None => ("MARKET", None),
         };
 
-        // Binance requires query params sorted alphabetically for signature
+        // Binance requires query params sorted alphabetically for signature.
+        // newOrderRespType=RESULT is CRITICAL: without it, Binance defaults to ACK
+        // which returns status=NEW with no fill data, forcing a 200ms wait for the
+        // private WS ORDER_TRADE_UPDATE. With RESULT, the response includes
+        // status=FILLED/EXPIRED + avgPrice + executedQty directly (~3ms total RTT).
         let query = if let Some(ref p) = price_str {
             format!(
-                "apiKey={}&newClientOrderId={}&price={}&quantity={:.8}&reduceOnly={}&side={}&symbol={}&timeInForce=IOC&timestamp={}&type={}",
+                "apiKey={}&newClientOrderId={}&newOrderRespType=RESULT&price={}&quantity={:.8}&reduceOnly={}&side={}&symbol={}&timeInForce=IOC&timestamp={}&type={}",
                 self.api_key, client_order_id, p, quantity, reduce_only_str, side, symbol, ts, order_type
             )
         } else {
             format!(
-                "apiKey={}&newClientOrderId={}&quantity={:.8}&reduceOnly={}&side={}&symbol={}&timestamp={}&type={}",
+                "apiKey={}&newClientOrderId={}&newOrderRespType=RESULT&quantity={:.8}&reduceOnly={}&side={}&symbol={}&timestamp={}&type={}",
                 self.api_key, client_order_id, quantity, reduce_only_str, side, symbol, ts, order_type
             )
         };
@@ -618,6 +622,7 @@ impl BinanceTradeWs {
             "type": order_type,
             "quantity": format!("{:.8}", quantity),
             "newClientOrderId": client_order_id,
+            "newOrderRespType": "RESULT",
             "reduceOnly": reduce_only_str,
             "timestamp": ts,
             "signature": signature,
