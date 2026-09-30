@@ -1099,12 +1099,12 @@ impl LiveTradingEngine {
             }
         }
 
-        // Adaptive slippage cap: Allow more slippage if the spread is wider, up to 0.35%
-        let slip_pct = if spread > 1.2 {
-            MAX_ALLOWED_SLIPPAGE_PCT / 100.0
-        } else {
-            0.002
-        };
+        // Adaptive slippage cap: proportional to the detected spread.
+        // Use 30% of the spread as slippage headroom, clamped between 0.15% and 0.35%.
+        // This ensures wider spreads get more breathing room for stale books (~180ms),
+        // while narrow spreads stay tight to protect profitability.
+        // Example: 0.875% spread → 0.26% slip, 0.65% spread → 0.20% slip, 1.5% → 0.35% slip (capped)
+        let slip_pct = ((spread * 0.30) / 100.0).clamp(0.0015, MAX_ALLOWED_SLIPPAGE_PCT / 100.0);
         let raw_buy_price = buy_ask * (1.0 + slip_pct);
         let raw_sell_price = sell_bid * (1.0 - slip_pct);
         // Round limit prices to exchange tick size to prevent "Price not increased by tick size" errors
