@@ -147,6 +147,11 @@ pub struct BinanceTradeWs {
     reconnect_count: Arc<AtomicU64>,
     /// Epoch millis of the last disconnect. Used to track reconnect gaps.
     last_disconnect_ms: Arc<AtomicI64>,
+    /// Consecutive connection failures without a successful connect.
+    /// Used to detect persistent WS problems (e.g. auth rejection, network block).
+    consecutive_failures: Arc<AtomicU64>,
+    /// Epoch millis of the last successful connection. 0 if never connected.
+    last_connect_ms: Arc<AtomicI64>,
 }
 
 impl BinanceTradeWs {
@@ -162,6 +167,8 @@ impl BinanceTradeWs {
             last_pong_ms: Arc::new(AtomicI64::new(0)),
             reconnect_count: Arc::new(AtomicU64::new(0)),
             last_disconnect_ms: Arc::new(AtomicI64::new(0)),
+            consecutive_failures: Arc::new(AtomicU64::new(0)),
+            last_connect_ms: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -203,25 +210,92 @@ impl BinanceTradeWs {
             .as_millis() as i64
     }
 
+    /// Get the number of consecutive connection failures.
+    /// If > 0, the WS is in a reconnect loop and orders will fall back to REST.
+    pub fn consecutive_failures(&self) -> u64 {
+        self.consecutive_failures.load(Ordering::Relaxed)
+    }
+
+    /// Get total successful reconnections since process start.
+    pub fn total_reconnects(&self) -> u64 {
+        self.reconnect_count.load(Ordering::Relaxed)
+    }
+
+    /// How long since the last disconnect in ms. Returns 0 if never disconnected.
+    pub fn last_disconnect_age_ms(&self) -> i64 {
+        let dc = self.last_disconnect_ms.load(Ordering::Relaxed);
+        if dc == 0 { return 0; }
+        Self::epoch_ms_i64() - dc
+    }
+
+    /// How long since the last successful connection in ms. Returns -1 if never connected.
+    pub fn last_connect_age_ms(&self) -> i64 {
+        let c = self.last_connect_ms.load(Ordering::Relaxed);
+        if c == 0 { return -1; }
+        Self::epoch_ms_i64() - c
+    }
+
+    /// Wait up to `max_wait_ms` for the FIRST connection to succeed.
+    /// Used at startup to verify the WS API is reachable before trading.
+    /// Returns true if connected within the timeout.
+    pub async fn wait_for_first_connect(&self, max_wait_ms: u64) -> bool {
+        let start = std::time::Instant::now();
+        let check_interval = std::time::Duration::from_millis(50);
+        let deadline = std::time::Duration::from_millis(max_wait_ms);
+        while start.elapsed() < deadline {
+            if self.is_connected() {
+                ws_log!(
+                    "[BinanceTradeWS] ✅ First connection verified after {}ms",
+                    start.elapsed().as_millis()
+                );
+                return true;
+            }
+            tokio::time::sleep(check_interval).await;
+        }
+        let failures = self.consecutive_failures();
+        ws_log!(
+            "[BinanceTradeWS] ⚠️ First connection FAILED after {}ms wait ({} consecutive failures)",
+            max_wait_ms, failures
+        );
+        false
+    }
+
     /// Spawn the WebSocket connection loop as a background task.
-    /// Automatically reconnects on disconnect with 500ms backoff.
+    /// Automatically reconnects on disconnect with adaptive backoff.
     pub fn spawn_connection(&self) {
         let handle = self.clone();
         tokio::spawn(async move {
             loop {
-                ws_log!("[BinanceTradeWS] Connecting to {}...", WS_API_URL);
+                let failures = handle.consecutive_failures.load(Ordering::Relaxed);
+                ws_log!(
+                    "[BinanceTradeWS] Connecting to {} (consecutive_failures={})...",
+                    WS_API_URL, failures
+                );
                 handle.run_connection().await;
                 handle.connected.store(false, Ordering::Relaxed);
                 handle.last_disconnect_ms.store(Self::epoch_ms_i64(), Ordering::Relaxed);
                 let n = handle.reconnect_count.fetch_add(1, Ordering::Relaxed) + 1;
+                let cur_failures = handle.consecutive_failures.load(Ordering::Relaxed);
                 ws_log!(
-                    "[BinanceTradeWS] ❌ Disconnected — reconnecting IMMEDIATELY (reconnect #{})",
-                    n
+                    "[BinanceTradeWS] ❌ Disconnected (reconnect #{}, consecutive_failures={}) — ALL ORDERS USING SLOW 200ms REST PATH",
+                    n, cur_failures
                 );
-                // Reconnect immediately — every millisecond without WS costs us
-                // 200ms extra latency per trade. Only add minimal backoff (100ms)
-                // to avoid CPU spin if the server is rejecting us.
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // Adaptive backoff: start at 100ms, increase on consecutive failures
+                // but cap at 5s to avoid being down too long.
+                let backoff_ms = if cur_failures > 10 {
+                    5000u64
+                } else if cur_failures > 5 {
+                    2000
+                } else if cur_failures > 2 {
+                    500
+                } else {
+                    100
+                };
+                ws_log!(
+                    "[BinanceTradeWS] Reconnecting in {}ms...",
+                    backoff_ms
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
             }
         });
     }
@@ -278,18 +352,28 @@ impl BinanceTradeWs {
         let ws_url = match url::Url::parse(WS_API_URL) {
             Ok(u) => u,
             Err(e) => {
-                eprintln!("[BinanceTradeWS] Invalid URL: {}", e);
+                ws_log!("[BinanceTradeWS] ❌ Invalid URL: {} — this is a code bug!", e);
+                self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         };
 
-        let (ws_stream, _) = match connect_async(ws_url).await {
+        let connect_t0 = std::time::Instant::now();
+        let (ws_stream, response) = match connect_async(ws_url).await {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[BinanceTradeWS] Connection failed: {}", e);
+                let failures = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                ws_log!(
+                    "[BinanceTradeWS] ❌ Connection FAILED (attempt took {}ms, consecutive_failures={}): {}",
+                    connect_t0.elapsed().as_millis(), failures, e
+                );
+                ws_log!(
+                    "[BinanceTradeWS] ⚠️ ALL ORDERS ROUTING VIA SLOW REST API (~200ms) UNTIL WS RECOVERS"
+                );
                 return;
             }
         };
+        let connect_ms = connect_t0.elapsed().as_millis();
 
         let (write, mut read) = ws_stream.split();
 
@@ -299,6 +383,8 @@ impl BinanceTradeWs {
             *sink_guard = Some(write);
         }
         self.connected.store(true, Ordering::Relaxed);
+        self.consecutive_failures.store(0, Ordering::Relaxed); // Reset on success
+        self.last_connect_ms.store(Self::epoch_ms_i64(), Ordering::Relaxed);
         self.last_pong_ms.store(Self::epoch_ms_i64(), Ordering::Relaxed);
         let last_dc = self.last_disconnect_ms.load(Ordering::Relaxed);
         let downtime = if last_dc > 0 {
@@ -306,7 +392,10 @@ impl BinanceTradeWs {
         } else {
             0
         };
-        ws_log!("[BinanceTradeWS] ✅ Connected to Binance WS API (downtime={}ms)", downtime);
+        ws_log!(
+            "[BinanceTradeWS] ✅ Connected to Binance WS API (handshake={}ms, downtime={}ms, HTTP status={:?})",
+            connect_ms, downtime, response.status()
+        );
 
         // ── Ping task: send WebSocket-level pings every PING_INTERVAL_SECS ──
         let sink_for_ping = self.sink.clone();
@@ -550,7 +639,8 @@ impl BinanceTradeWs {
         let (tx, rx) = oneshot::channel::<Result<serde_json::Value, String>>();
         self.pending.insert(req_id.clone(), tx);
 
-        eprintln!(
+        let send_t0 = std::time::Instant::now();
+        ws_log!(
             "[BinanceTradeWS] Sending {} {} {} @ {} (reqId={}, clientId={})",
             side, quantity, symbol, order_type, req_id, client_order_id
         );
@@ -572,17 +662,20 @@ impl BinanceTradeWs {
             }
         }
 
+        let send_elapsed_ms = send_t0.elapsed().as_millis();
+
         // Wait for the response with a 500ms timeout (generous for a WS RTT of ~10-15ms).
         // This timeout covers extreme cases like WS congestion.
         let timeout = std::time::Duration::from_millis(500);
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(result_json))) => {
+                let total_rtt_ms = send_t0.elapsed().as_millis();
                 // Parse the WsOrderResult from the response
                 match serde_json::from_value::<WsOrderResult>(result_json.clone()) {
                     Ok(order) => {
-                        eprintln!(
-                            "[BinanceTradeWS] Order accepted: id={:?} status={} filled={} avgPrice={}",
-                            order.orderId, order.status, order.executedQty, order.avgPrice
+                        ws_log!(
+                            "[BinanceTradeWS] ⚡ Order filled via WS in {}ms (send={}ms): id={:?} status={} filled={} avgPrice={}",
+                            total_rtt_ms, send_elapsed_ms, order.orderId, order.status, order.executedQty, order.avgPrice
                         );
                         Ok(order)
                     }
@@ -592,13 +685,27 @@ impl BinanceTradeWs {
                     )),
                 }
             }
-            Ok(Ok(Err(api_err))) => Err(api_err),
+            Ok(Ok(Err(api_err))) => {
+                ws_log!(
+                    "[BinanceTradeWS] WS API error after {}ms: {}",
+                    send_t0.elapsed().as_millis(), api_err
+                );
+                Err(api_err)
+            }
             Ok(Err(_)) => {
                 self.pending.remove(&req_id);
+                ws_log!(
+                    "[BinanceTradeWS] WS channel closed after {}ms for reqId={}",
+                    send_t0.elapsed().as_millis(), req_id
+                );
                 Err("WS response channel closed".to_string())
             }
             Err(_) => {
                 self.pending.remove(&req_id);
+                ws_log!(
+                    "[BinanceTradeWS] ⚠️ WS order TIMEOUT after {}ms for reqId={} — connection may be zombie",
+                    timeout.as_millis(), req_id
+                );
                 Err(format!(
                     "WS order timeout ({}ms) for reqId={}",
                     timeout.as_millis(),

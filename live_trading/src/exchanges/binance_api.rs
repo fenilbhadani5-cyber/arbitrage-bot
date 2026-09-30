@@ -187,7 +187,7 @@ impl BinanceClient {
             api_secret,
             http_fast,
             http_slow,
-            base_url: "https://fapi.binance.com".to_string(),
+            base_url: "https://fapi2.binance.com".to_string(),
             pending_fills,
             live_balance,
             order_count_10s,
@@ -207,6 +207,11 @@ impl BinanceClient {
     /// Falls back to 0.0 if private WS has not yet delivered a balance.
     pub async fn get_live_balance(&self) -> f64 {
         *self.live_balance.read().await
+    }
+
+    /// Get a reference to the Trade WS client for diagnostics and startup verification.
+    pub fn trade_ws(&self) -> &super::binance_trade_ws::BinanceTradeWs {
+        &self.trade_ws
     }
 
     /// Get current server timestamp in milliseconds.
@@ -496,18 +501,23 @@ impl BinanceClient {
         // But in the common case: 150ms wait + 8ms = 158ms, beating REST.
         if !ws_connected {
             eprintln!(
-                "[{}][BinanceAPI] WS disconnected at trade time — waiting up to 500ms for reconnect",
-                Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                "[{}][BinanceAPI] ⚠️ WS disconnected at trade time — waiting up to 500ms for reconnect (failures={}, last_connect={}ms ago)",
+                Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                self.trade_ws.consecutive_failures(),
+                self.trade_ws.last_connect_age_ms(),
             );
             ws_connected = self.trade_ws.wait_for_reconnect(500).await;
         }
 
         // Log the routing decision to ws_debug.log for post-mortem analysis
         {
-            let route = if ws_connected { "WS_API (~8ms)" } else { "REST_FALLBACK (~210ms)" };
+            let route = if ws_connected { "WS_API (~8ms)" } else { "REST_FALLBACK (~200ms) ⚠️ SLOW" };
+            let failures = self.trade_ws.consecutive_failures();
+            let reconnects = self.trade_ws.total_reconnects();
             let msg = format!(
-                "[BinanceAPI] Order routing: {} (WS connected={}) | {} {} {} qty={}",
-                route, ws_connected, side, symbol, if ws_connected { "via WS" } else { "via REST" }, quantity
+                "[BinanceAPI] Order routing: {} (WS connected={}, failures={}, reconnects={}) | {} {} {} qty={}",
+                route, ws_connected, failures, reconnects, side, symbol,
+                if ws_connected { "via WS" } else { "via REST" }, quantity
             );
             let ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
             let line = format!("[{}] {}", ts, msg);
@@ -564,8 +574,13 @@ impl BinanceClient {
                 }
             }
         } else {
-            // WS not connected — use REST directly
-            eprintln!("[BinanceAPI] Trade WS not connected, using REST");
+            // WS not connected — use REST directly (SLOW PATH ~200ms)
+            eprintln!(
+                "[{}][BinanceAPI] ⚠️ Trade WS NOT CONNECTED (failures={}, reconnects={}), using SLOW REST path (~200ms)!",
+                Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                self.trade_ws.consecutive_failures(),
+                self.trade_ws.total_reconnects(),
+            );
             match self
                 .place_order(symbol, side, quantity, &client_order_id, reduce_only, price)
                 .await

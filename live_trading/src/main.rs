@@ -299,6 +299,21 @@ async fn main() {
         }
     }
 
+    // ── Verify Binance Trade WS API connection (fast 8ms path) ──
+    // The WS API bypasses Cloudflare CDN and achieves ~8-15ms order RTT vs ~200ms REST.
+    // If this fails, ALL trades will use the slow REST fallback — defeating the purpose.
+    eprintln!("[Startup] Verifying Binance Trade WS API connection...");
+    {
+        let ws_ok = binance_client.trade_ws().wait_for_first_connect(5000).await;
+        if ws_ok {
+            eprintln!("\x1b[32;1m[Startup] ✅ Binance Trade WS API connected — orders will use fast ~8ms WS path\x1b[0m");
+        } else {
+            eprintln!("\x1b[31;1m[Startup] ⚠️  Binance Trade WS API FAILED to connect within 5s!\x1b[0m");
+            eprintln!("\x1b[31;1m[Startup] ⚠️  ALL orders will use SLOW REST path (~200ms) — IOC orders WILL EXPIRE!\x1b[0m");
+            eprintln!("\x1b[33m[Startup] Check ws_debug.log for connection errors. Bot will continue but trades will likely fail.\x1b[0m");
+        }
+    }
+
     // ── Load exchange symbol metadata (tick sizes, step sizes, min notional) ──
     let exchange_info = exchanges::exchange_info::ExchangeInfoCache::new();
     eprintln!("[Startup] Loading exchange symbol metadata...");
