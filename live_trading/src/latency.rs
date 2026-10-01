@@ -112,6 +112,15 @@ pub struct TradeLatency {
 
     // fill prices come from the fill itself (buy_fill_price, sell_fill_price in TradeRecord)
 
+    // ── Order routing flags ──
+    /// How the buy-side order was routed: "WS" (Binance WS API ~2ms) or "REST" (~200ms fallback).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binance_order_via: Option<String>,
+
+    /// How the sell-side order was routed: "WS" or "REST" (Bybit always uses REST for placement).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bybit_order_via: Option<String>,
+
     // ── Latency diagnosis ──
     /// Human-readable diagnosis of the latency profile.
     /// e.g. "OK", "STALE_BOOK", "SLOW_REST", "SLOW_WS_FILL", "PROCESSING_DELAY", "SLOW_BUY_LEG", "SLOW_SELL_LEG"
@@ -206,58 +215,68 @@ impl TradeLatency {
 
     /// Produce a human-readable diagnosis string.
     fn diagnose(&self) -> String {
-        let mut issues: Vec<&str> = Vec::new();
+        let mut issues: Vec<String> = Vec::new();
+
+        // ── Routing flags (always shown first for visibility) ──
+        let bin_via = self.binance_order_via.as_deref().unwrap_or("?");
+        let byb_via = self.bybit_order_via.as_deref().unwrap_or("?");
+        issues.push(format!("Binance={} Bybit={}", bin_via, byb_via));
 
         if self.book_to_send_ms.unwrap_or(0) > 200 {
-            issues.push("STALE_BOOK(>200ms)");
+            issues.push("STALE_BOOK(>200ms)".to_string());
         } else if self.book_to_send_ms.unwrap_or(0) > 100 {
-            issues.push("STALE_BOOK(>100ms)");
+            issues.push("STALE_BOOK(>100ms)".to_string());
         }
 
         if self.detection_to_send_ms.unwrap_or(0) > 50 {
-            issues.push("PROCESSING_DELAY(>50ms)");
+            issues.push("PROCESSING_DELAY(>50ms)".to_string());
         } else if self.detection_to_send_ms.unwrap_or(0) > 20 {
-            issues.push("PROCESSING_DELAY(>20ms)");
+            issues.push("PROCESSING_DELAY(>20ms)".to_string());
         }
 
+        // Only flag SLOW_REST if Binance used REST (not WS)
+        let binance_used_rest = self.binance_order_via.as_deref() == Some("REST");
         if self.send_to_ack_ms.unwrap_or(0) > 500 {
-            issues.push("SLOW_REST(>500ms)");
+            if binance_used_rest {
+                issues.push("SLOW_REST(>500ms)".to_string());
+            } else {
+                issues.push("SLOW_JOIN(>500ms)".to_string());
+            }
         } else if self.send_to_ack_ms.unwrap_or(0) > 200 {
-            issues.push("SLOW_REST(>200ms)");
+            if binance_used_rest {
+                issues.push("SLOW_REST(>200ms)".to_string());
+            }
+            // If Binance used WS, >200ms send_to_ack is just the Bybit REST+fill wait — not a problem
         }
 
         if let Some(buy_rtt) = self.buy_leg_rtt_ms {
             if buy_rtt > 400 {
-                issues.push("SLOW_BUY_LEG(>400ms)");
+                issues.push("SLOW_BUY_LEG(>400ms)".to_string());
             }
         }
 
         if let Some(sell_rtt) = self.sell_leg_rtt_ms {
             if sell_rtt > 400 {
-                issues.push("SLOW_SELL_LEG(>400ms)");
+                issues.push("SLOW_SELL_LEG(>400ms)".to_string());
             }
         }
 
         if self.ack_to_fill_ms.unwrap_or(0) > 200 {
-            issues.push("SLOW_WS_FILL(>200ms)");
+            issues.push("SLOW_WS_FILL(>200ms)".to_string());
         } else if self.ack_to_fill_ms.unwrap_or(0) > 50 {
-            issues.push("SLOW_WS_FILL(>50ms)");
+            issues.push("SLOW_WS_FILL(>50ms)".to_string());
         }
 
         if let (Some(det_ask), Some(fill_ask)) = (self.detected_buy_ask, self.preflight_buy_ask) {
             if det_ask > 0.0 {
                 let slip = ((fill_ask - det_ask) / det_ask).abs() * 100.0;
                 if slip > 0.2 {
-                    issues.push("MARKET_MOVED(buy_ask)");
+                    issues.push("MARKET_MOVED(buy_ask)".to_string());
                 }
             }
         }
 
-        if issues.is_empty() {
-            "OK".to_string()
-        } else {
-            issues.join("|")
-        }
+        issues.join(" | ")
     }
 
     /// Log a formatted latency summary to stderr with UTC timestamp.

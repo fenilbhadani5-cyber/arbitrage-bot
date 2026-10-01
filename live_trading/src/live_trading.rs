@@ -1138,9 +1138,16 @@ impl LiveTradingEngine {
                         .await;
                     (res, t0.elapsed().as_millis() as i64)
                 };
-                let ((buy_result, buy_rtt_ms), (sell_result, sell_rtt_ms)) =
+                let ((buy_result_raw, buy_rtt_ms), (sell_result, sell_rtt_ms)) =
                     tokio::join!(buy_fut, sell_fut);
                 latency.mark_exchange_ack();
+                // Unpack routing tag from Binance result
+                let (buy_result, binance_route) = match buy_result_raw {
+                    Ok((fill, route)) => (Ok(fill), route),
+                    Err(e) => (Err(e), "?"),
+                };
+                latency.binance_order_via = Some(binance_route.to_string());
+                latency.bybit_order_via = Some("REST".to_string()); // Bybit always uses REST for placement
                 latency.buy_leg_rtt_ms = Some(buy_rtt_ms);
                 latency.sell_leg_rtt_ms = Some(sell_rtt_ms);
                 latency.compute_derived();
@@ -1277,9 +1284,16 @@ impl LiveTradingEngine {
                         .await;
                     (res, t0.elapsed().as_millis() as i64)
                 };
-                let ((buy_result, buy_rtt_ms), (sell_result, sell_rtt_ms)) =
+                let ((buy_result, buy_rtt_ms), (sell_result_raw, sell_rtt_ms)) =
                     tokio::join!(buy_fut, sell_fut);
                 latency.mark_exchange_ack();
+                // Unpack routing tag from Binance result (sell side this time)
+                let (sell_result, binance_route) = match sell_result_raw {
+                    Ok((fill, route)) => (Ok(fill), route),
+                    Err(e) => (Err(e), "?"),
+                };
+                latency.bybit_order_via = Some("REST".to_string()); // Bybit buy always REST
+                latency.binance_order_via = Some(binance_route.to_string());
                 latency.buy_leg_rtt_ms = Some(buy_rtt_ms);
                 latency.sell_leg_rtt_ms = Some(sell_rtt_ms);
                 latency.compute_derived();
@@ -1498,7 +1512,7 @@ impl LiveTradingEngine {
                                     worst_align_price,
                                 )
                                 .await
-                                .map(|f| f.filled_qty),
+                                .map(|(f, _)| f.filled_qty),
                             Exchange::Bybit => self
                                 .bybit_client
                                 .execute_order_with_fill(
@@ -1555,7 +1569,7 @@ impl LiveTradingEngine {
                                     worst_align_price,
                                 )
                                 .await
-                                .map(|f| f.filled_qty),
+                                .map(|(f, _)| f.filled_qty),
                             Exchange::Bybit => self
                                 .bybit_client
                                 .execute_order_with_fill(
@@ -1829,10 +1843,10 @@ impl LiveTradingEngine {
                     )
                 );
                 match (sell_result, buy_result) {
-                    (Ok(sf), Ok(bf)) => (close_from_binance(&sf), close_from_bybit(&bf)),
+                    (Ok((sf, _)), Ok(bf)) => (close_from_binance(&sf), close_from_bybit(&bf)),
 
                     // ── Binance SELL OK, Bybit BUY failed → retry Bybit only ──
-                    (Ok(sf), Err(first_err)) => {
+                    (Ok((sf, _)), Err(first_err)) => {
                         eprintln!("[LiveTrading] ⚠️ PARTIAL CLOSE {}: Binance SELL filled, Bybit BUY failed: {} — retrying Bybit only", coin, first_err);
                         let mut recovered: Option<CloseFill> = None;
                         for attempt in 1..=MAX_CLOSE_RETRIES {
@@ -1888,7 +1902,7 @@ impl LiveTradingEngine {
                                 .execute_order_with_fill(&symbol, "SELL", close_buy_qty, true, None)
                                 .await
                             {
-                                Ok(sf) => {
+                                Ok((sf, _)) => {
                                     recovered = Some(close_from_binance(&sf));
                                     break;
                                 }
@@ -1934,7 +1948,7 @@ impl LiveTradingEngine {
                     )
                 );
                 match (sell_result, buy_result) {
-                    (Ok(sf), Ok(bf)) => (close_from_bybit(&sf), close_from_binance(&bf)),
+                    (Ok(sf), Ok((bf, _))) => (close_from_bybit(&sf), close_from_binance(&bf)),
 
                     // ── Bybit SELL OK, Binance BUY failed → retry Binance only ──
                     (Ok(sf), Err(first_err)) => {
@@ -1954,7 +1968,7 @@ impl LiveTradingEngine {
                                 .execute_order_with_fill(&symbol, "BUY", close_sell_qty, true, None)
                                 .await
                             {
-                                Ok(bf) => {
+                                Ok((bf, _)) => {
                                     recovered = Some(close_from_binance(&bf));
                                     break;
                                 }
@@ -1975,7 +1989,7 @@ impl LiveTradingEngine {
                     }
 
                     // ── Binance BUY OK, Bybit SELL failed → retry Bybit only ──
-                    (Err(first_err), Ok(bf)) => {
+                    (Err(first_err), Ok((bf, _))) => {
                         eprintln!("[LiveTrading] ⚠️ PARTIAL CLOSE {}: Binance BUY filled, Bybit SELL failed: {} — retrying Bybit only", coin, first_err);
                         let mut recovered: Option<CloseFill> = None;
                         for attempt in 1..=MAX_CLOSE_RETRIES {

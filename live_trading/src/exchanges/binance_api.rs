@@ -462,14 +462,13 @@ impl BinanceClient {
         Ok(trades)
     }
 
-    /// Place a market order and return a structured OrderFill.
+    /// Place a market order and return a structured OrderFill plus routing tag.
     ///
     /// Uses the WebSocket API for ultra-low-latency order placement (~10-15ms)
     /// when connected, falling back to REST API (~210ms) if WS is disconnected.
     ///
-    /// Registers the oneshot fill channel BEFORE placing the order using a
-    /// pre-generated `newClientOrderId`. This eliminates the race condition where
-    /// the private WS fill event arrives (5-20ms) before the channel was registered.
+    /// Returns `(OrderFill, route)` where `route` is `"WS"` or `"REST"`.
+    /// This lets callers record the routing method in the latency struct for post-mortem.
     /// `reduce_only`: pass `true` for close orders to prevent opening new positions.
     pub async fn execute_order_with_fill(
         &self,
@@ -478,7 +477,7 @@ impl BinanceClient {
         quantity: f64,
         reduce_only: bool,
         price: Option<f64>,
-    ) -> Result<OrderFill, String> {
+    ) -> Result<(OrderFill, &'static str), String> {
         // Generate a unique client order ID and register the fill channel FIRST
         // so it's ready before the WS fill event can arrive.
         let client_order_id = format!(
@@ -528,7 +527,7 @@ impl BinanceClient {
             }
         }
 
-        let order = if ws_connected {
+        let (order, route) = if ws_connected {
             match self
                 .trade_ws
                 .place_order(symbol, side, quantity, &client_order_id, reduce_only, price)
@@ -539,7 +538,7 @@ impl BinanceClient {
                     let executed_qty = ws_order.executedQty.clone();
                     let avg_price = ws_order.avgPrice.clone();
                     let cum_quote = ws_order.cumQuote.clone();
-                    BinanceOrderResponse {
+                    (BinanceOrderResponse {
                         orderId: ws_order.orderId.unwrap_or(0),
                         symbol: ws_order.symbol,
                         status: ws_order.status,
@@ -549,7 +548,7 @@ impl BinanceClient {
                         avgPrice: avg_price,
                         cumQuote: cum_quote,
                         updateTime: ws_order.updateTime,
-                    }
+                    }, "WS")
                 }
                 Err(ws_err) => {
                     // WS failed — fall back to REST
@@ -561,7 +560,7 @@ impl BinanceClient {
                         .place_order(symbol, side, quantity, &client_order_id, reduce_only, price)
                         .await
                     {
-                        Ok(o) => o,
+                        Ok(o) => (o, "REST"),
                         Err(e) => {
                             self.pending_fills.remove(&client_order_id);
                             return Err(e);
@@ -581,7 +580,7 @@ impl BinanceClient {
                 .place_order(symbol, side, quantity, &client_order_id, reduce_only, price)
                 .await
             {
-                Ok(o) => o,
+                Ok(o) => (o, "REST"),
                 Err(e) => {
                     self.pending_fills.remove(&client_order_id);
                     return Err(e);
@@ -615,10 +614,10 @@ impl BinanceClient {
             let quote_qty = order.cumQuote.parse::<f64>().unwrap_or(avg_price * executed_qty);
             let commission = quote_qty * 0.0005; // 0.05% taker fee
             eprintln!(
-                "[BinanceAPI] ⚡ INSTANT FILL: order={} avgPrice={} qty={} quote={} fee={:.6} (skipped 200ms WS wait)",
-                order.orderId, avg_price, executed_qty, quote_qty, commission
+                "[BinanceAPI] ⚡ INSTANT FILL via {}: order={} avgPrice={} qty={} quote={} fee={:.6}",
+                route, order.orderId, avg_price, executed_qty, quote_qty, commission
             );
-            return Ok(OrderFill {
+            return Ok((OrderFill {
                 order_id: order.orderId,
                 symbol: order.symbol,
                 side: order.side,
@@ -629,7 +628,7 @@ impl BinanceClient {
                 commission_asset: "USDT".to_string(),
                 realized_pnl: 0.0,
                 timestamp: order.updateTime,
-            });
+            }, route));
         }
 
         // ── DEFERRED FILL PATH (for NEW / PARTIALLY_FILLED) ──
@@ -653,7 +652,7 @@ impl BinanceClient {
             }
             Ok(Ok(fill)) => {
                 // Fill arrived via WS push — fast path
-                Ok(OrderFill {
+                Ok((OrderFill {
                     order_id: order.orderId,
                     symbol: order.symbol,
                     side: order.side,
@@ -664,7 +663,7 @@ impl BinanceClient {
                     commission_asset: "USDT".to_string(),
                     realized_pnl: 0.0,
                     timestamp: fill.timestamp,
-                })
+                }, route))
             }
             _ => {
                 // Timeout or channel closed.
@@ -716,7 +715,7 @@ impl BinanceClient {
                                         order.orderId, detail.status, avg_price, filled_qty
                                     ));
                                 }
-                                Ok(OrderFill {
+                                Ok((OrderFill {
                                     order_id: order.orderId,
                                     symbol: order.symbol,
                                     side: order.side,
@@ -727,7 +726,7 @@ impl BinanceClient {
                                     commission_asset: "USDT".to_string(),
                                     realized_pnl: 0.0,
                                     timestamp: order.updateTime,
-                                })
+                                }, route))
                             }
                             Err(e) => {
                                 // Cannot parse order detail — return error so the caller
