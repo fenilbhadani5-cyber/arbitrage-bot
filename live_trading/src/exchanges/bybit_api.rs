@@ -547,10 +547,11 @@ impl BybitClient {
             }
         };
 
-        // Await fill from private WS — timeout 200ms
-        // Tokyo RTT to Bybit is ~86ms, so 200ms = ~2.3x headroom for WS events.
-        // If it doesn't arrive in 200ms, WS may be disconnected; fall back to REST.
-        match tokio::time::timeout(std::time::Duration::from_millis(200), rx).await {
+        // Await fill from private WS — timeout 100ms
+        // Tokyo RTT to Bybit is ~86ms, so 100ms = ~1.2x headroom for WS events.
+        // Reduced from 200ms — the old timeout was causing total trade RTT to exceed 200ms
+        // even when Bybit REST ack was at ~82ms, triggering false SLOW_REST(>200ms) diagnostics.
+        match tokio::time::timeout(std::time::Duration::from_millis(100), rx).await {
             Ok(Ok(fill)) if fill.is_expired => {
                 // WS delivered an Expired/Cancelled event with 0 fill — fast fail in ~20ms.
                 // This replaces the old 500ms timeout + REST fallback path.
