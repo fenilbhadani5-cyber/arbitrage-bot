@@ -302,16 +302,16 @@ impl BinanceTradeWs {
                     "[BinanceTradeWS] ❌ Disconnected (reconnect #{}, consecutive_failures={}) — ALL ORDERS USING SLOW 200ms REST PATH",
                     n, cur_failures
                 );
-                // Adaptive backoff: start at 100ms, increase on consecutive failures
-                // but cap at 5s to avoid being down too long.
+                // Aggressive reconnect: always retry within 50ms to minimize REST fallback time.
+                // The old 100ms-5000ms backoff caused extended REST usage (~200ms/trade) after
+                // repeated disconnects. The WS connection failing is transient; reconnecting fast
+                // is better than staying on the slow REST path for seconds.
                 let backoff_ms = if cur_failures > 10 {
-                    5000u64
+                    50u64
                 } else if cur_failures > 5 {
-                    2000
-                } else if cur_failures > 2 {
-                    500
+                    30
                 } else {
-                    100
+                    10
                 };
                 ws_log!(
                     "[BinanceTradeWS] Reconnecting in {}ms...",

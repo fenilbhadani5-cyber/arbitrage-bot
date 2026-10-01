@@ -75,7 +75,7 @@ impl Default for DynamicSpreadConfig {
             crossing_history_depth: 5,
             outlier_cap_multiplier: 8.0,
             max_data_age_ms: 2000,
-            max_arbitrage_hold_time_ms: 600000, // 10 minutes
+            max_arbitrage_hold_time_ms: u64::MAX, // No hold time limit — hold until spread converges
             max_slippage_pct: 0.35,
             max_depth_levels: 10,
             minimum_liquidity: 100.0,
