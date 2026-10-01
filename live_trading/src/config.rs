@@ -23,8 +23,10 @@ pub const ENTRY_SPREAD_THRESHOLD: f64 = 1.0;
 pub const MAX_SPREAD_THRESHOLD: f64 = 10.0;
 
 /// Maximum allowed orderbook age in milliseconds before a quote is considered stale.
-/// 2000ms ensures quotes are fresh and prevents executing on dormant/stale quotes.
-pub const MAX_BOOK_AGE_MILLIS: u128 = 400;
+/// Reduced from 400ms to 150ms: stale books (e.g. Q at 1194ms) are the #1 cause of
+/// Binance slippage — the detected price is a transient spike that has already reverted.
+/// With Binance WS at 2ms and book updates every ~100ms, 150ms gives sufficient headroom.
+pub const MAX_BOOK_AGE_MILLIS: u128 = 150;
 
 /// Maximum acceptable slippage % between quoted orderbook price and executed fill price.
 /// Raised to 0.75% to accommodate Bybit's ~80ms RTT lag vs Binance's ~3ms — price can drift

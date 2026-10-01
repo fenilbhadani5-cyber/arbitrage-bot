@@ -1102,11 +1102,14 @@ impl LiveTradingEngine {
         }
 
         // Adaptive slippage cap: proportional to the detected spread.
-        // Use 80% of the spread as slippage headroom, clamped between 0.15% and MAX_ALLOWED_SLIPPAGE_PCT.
-        // Bybit RTT is ~80ms vs Binance ~3ms. In that 80ms window the price can drift significantly.
-        // 80% of spread gives enough room without sacrificing too much profitability.
-        // Example: 0.708% spread → 0.57% slip, 1.0% spread → 0.75% slip (capped), 0.60% → 0.48% slip
-        let slip_pct = ((spread * 0.80) / 100.0).clamp(0.0015, MAX_ALLOWED_SLIPPAGE_PCT / 100.0);
+        // Use 50% of the spread as slippage headroom, clamped between 0.10% and MAX_ALLOWED_SLIPPAGE_PCT.
+        // 50% (down from 80%) rejects trades faster when the book has moved away,
+        // preventing entries where actual_entry_spread < exit_threshold (e.g. SOMI:
+        // detected 0.78% spread collapsed to 0.009% at fill because 80% cap allowed
+        // fills 0.63% away from detected price). Binance WS executes in 2ms and
+        // Bybit in ~82ms, so the cap mostly protects against transient book spikes.
+        // Example: 0.708% spread → 0.35% slip, 1.0% spread → 0.50% slip, 0.60% → 0.30% slip
+        let slip_pct = ((spread * 0.50) / 100.0).clamp(0.0010, MAX_ALLOWED_SLIPPAGE_PCT / 100.0);
         let raw_buy_price = buy_ask * (1.0 + slip_pct);
         let raw_sell_price = sell_bid * (1.0 - slip_pct);
         // Round limit prices to exchange tick size to prevent "Price not increased by tick size" errors
@@ -1465,6 +1468,83 @@ impl LiveTradingEngine {
                 Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
                 coin, buy_slippage, sell_slippage, MAX_ALLOWED_SLIPPAGE_PCT
             );
+        }
+
+        // ── POST-FILL SPREAD GATE: immediately unwind if slippage destroyed the spread ──
+        // If the actual executed spread is below the exit threshold, this position is
+        // already underwater before fees. Holding it can only deepen the loss (e.g. SOMI:
+        // detected 0.78% → filled at 0.009% → held 5s → closed at -$0.025).
+        // Immediate MARKET unwind cuts losses to just the round-trip fees (~$0.012).
+        if actual_entry_spread < dynamic_exit {
+            eprintln!(
+                "[{}][LiveTrading] 🚨 SPREAD GATE: {} filled at {:.3}% spread (below exit threshold {:.3}%) — IMMEDIATE UNWIND to cut losses",
+                Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                coin, actual_entry_spread, dynamic_exit
+            );
+
+            // Reverse both legs with MARKET orders (no price limit → guaranteed fill)
+            let rev_symbol = format!("{}USDT", coin);
+            let rev_buy_qty = Self::round_quantity(sell_filled_qty, sell_fill_price);
+            let rev_sell_qty = Self::round_quantity(buy_filled_qty, buy_fill_price);
+
+            // Reverse: sell what we bought, buy what we sold
+            // Execute directly in each branch to avoid incompatible future types
+            // (Binance returns (OrderFill, &str), Bybit returns OrderFill)
+            let unwind_ok = match (buy_exchange, sell_exchange) {
+                (Exchange::Binance, Exchange::Bybit) => {
+                    let (rev_sell_res, rev_buy_res) = tokio::join!(
+                        self.binance_client.execute_order_with_fill(&rev_symbol, "SELL", rev_sell_qty, true, None),
+                        self.bybit_client.execute_order_with_fill(&rev_symbol, "Buy", rev_buy_qty, true, None)
+                    );
+                    let sell_ok = rev_sell_res.is_ok();
+                    let buy_ok = rev_buy_res.is_ok();
+                    if !sell_ok || !buy_ok {
+                        eprintln!(
+                            "[{}][LiveTrading] ⚠️ SPREAD GATE UNWIND PARTIAL/FAILED for {} — sell(Binance): {:?}, buy(Bybit): {:?}",
+                            Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"), coin,
+                            rev_sell_res.err(), rev_buy_res.err()
+                        );
+                    }
+                    sell_ok && buy_ok
+                }
+                (Exchange::Bybit, Exchange::Binance) => {
+                    let (rev_sell_res, rev_buy_res) = tokio::join!(
+                        self.bybit_client.execute_order_with_fill(&rev_symbol, "Sell", rev_sell_qty, true, None),
+                        self.binance_client.execute_order_with_fill(&rev_symbol, "BUY", rev_buy_qty, true, None)
+                    );
+                    let sell_ok = rev_sell_res.is_ok();
+                    let buy_ok = rev_buy_res.is_ok();
+                    if !sell_ok || !buy_ok {
+                        eprintln!(
+                            "[{}][LiveTrading] ⚠️ SPREAD GATE UNWIND PARTIAL/FAILED for {} — sell(Bybit): {:?}, buy(Binance): {:?}",
+                            Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"), coin,
+                            rev_sell_res.err(), rev_buy_res.err()
+                        );
+                    }
+                    sell_ok && buy_ok
+                }
+                _ => {
+                    eprintln!("[LiveTrading] SPREAD GATE: Unsupported exchange pair for unwind!");
+                    false
+                }
+            };
+
+            if unwind_ok {
+                eprintln!(
+                    "[{}][LiveTrading] ✅ SPREAD GATE UNWIND SUCCESS for {} — both legs reversed",
+                    Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"), coin
+                );
+            }
+
+            self.log_missed_with_latency(
+                coin, buy_exchange, sell_exchange, buy_ask, sell_bid, spread, dynamic_entry, dynamic_exit, spread_velocity, Some(book_spread_pct),
+                format!("SPREAD_GATE_UNWIND: Executed spread {:.3}% < exit {:.3}% — immediately reversed both legs", actual_entry_spread, dynamic_exit),
+                Some(latency.clone()),
+            );
+
+            self.last_trade_time.insert(coin.to_string(), Utc::now());
+            self.refresh_balances().await;
+            return false;
         }
 
         // ── SAFETY CHECK 1: Filled quantity mismatch & Hedge Alignment ──

@@ -634,8 +634,11 @@ impl BinanceClient {
         // ── DEFERRED FILL PATH (for NEW / PARTIALLY_FILLED) ──
         // Order was accepted but not yet fully matched. Wait for the private WS
         // user data stream to deliver the ORDER_TRADE_UPDATE with final fill data.
-        // Timeout after 200ms; if it doesn't arrive, query REST as last resort.
-        let ws_timeout = std::time::Duration::from_millis(200);
+        // Timeout 50ms: Binance private WS fills arrive within 5-20ms from Tokyo.
+        // The old 200ms timeout caused the Binance leg to balloon from 2ms → 200ms
+        // when the WS API returned status=NEW (race: response sent before matching
+        // completes). Every extra ms here is additional slippage exposure.
+        let ws_timeout = std::time::Duration::from_millis(50);
 
         match tokio::time::timeout(ws_timeout, rx).await {
             Ok(Ok(fill)) if fill.is_expired => {
