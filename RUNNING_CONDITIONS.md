@@ -101,7 +101,7 @@ All trading parameters are in [`src/config.rs`](src/config.rs):
 | `MIN_HOLD_SECS` | `30s` | Minimum seconds to hold before allowing close |
 | `MAX_OPEN_POSITIONS` | `5` | Maximum concurrent open arbitrage positions |
 | `FUNDING_PAUSE_MINUTES` | `5 min` | Pause trading within ±5 minutes of funding time |
-| `SKIP_1H_FUNDING_COINS` | `true` | Skip coins with 1-hour funding intervals |
+| `SKIP_1H_FUNDING_COINS` | `false` | Allow coins with 1-hour funding intervals (block removed) |
 | `LIVE_TRADES_LOG_PATH` | `d:\Arbitrage\live_trades.jsonl` | Trade journal file path |
 
 ### Fee Rates (Taker, VIP-0)
@@ -122,8 +122,7 @@ All trading parameters are in [`src/config.rs`](src/config.rs):
 4. ✅ **Not in cooldown** — At least `TRADE_COOLDOWN_SECS` since last trade on this coin
 5. ✅ **Spread ≥ ENTRY_SPREAD_THRESHOLD** — Price difference exceeds 1.0%
 6. ✅ **Open positions < MAX_OPEN_POSITIONS** — Not at capacity (5)
-7. ✅ **Not a 1h funding coin** — (if `SKIP_1H_FUNDING_COINS` is true)
-8. ✅ **Not near funding time** — Outside ±5 minutes of funding timestamp
+7. ✅ **Not near funding time** — Outside ±5 minutes of funding timestamp
 9. ✅ **Order book spread is profitable** — `book_spread > total_fees + exit_threshold + 0.1%`
 10. ✅ **Sufficient liquidity** — Trade size adjusted to available orderbook depth
 11. ✅ **Trade size ≥ $5** — Skip micro-trades below $5

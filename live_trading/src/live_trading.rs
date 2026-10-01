@@ -555,30 +555,6 @@ impl LiveTradingEngine {
             return false;
         }
 
-        let funding_hours = funding_store.get(coin).map(|r| *r.value()).unwrap_or(8);
-
-        // ── 1H FUNDING EXCLUSION: Skip coins with 1h funding interval due to extreme volatility ──
-        if SKIP_1H_FUNDING_COINS && funding_hours <= 1 {
-            eprintln!(
-                "[LiveTrading] SKIP {}: 1h funding interval coins disabled due to high volatility",
-                coin
-            );
-            self.log_missed(
-                coin,
-                buy_exchange,
-                sell_exchange,
-                buy_last_price,
-                sell_last_price,
-                spread, dynamic_entry, dynamic_exit, spread_velocity,
-                None,
-                format!(
-                    "1H_FUNDING_COIN: Skipped coin with {}h funding interval (high volatility)",
-                    funding_hours
-                ),
-            );
-            return false;
-        }
-
         // ── FUNDING PAUSE: Skip if near funding time ──
         if funding::is_near_funding(coin, funding_store) {
             let countdown = funding::funding_countdown(coin, funding_store);

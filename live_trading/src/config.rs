@@ -52,8 +52,8 @@ pub const MAX_OPEN_POSITIONS: usize = 3;
 pub const FUNDING_PAUSE_MINUTES: i64 = 5;
 
 /// Stop trading completely on coins with 1-hour funding intervals because they are too volatile.
-/// Set to true to skip any coin with a 1h funding interval.
-pub const SKIP_1H_FUNDING_COINS: bool = true;
+/// Set to false to allow trading on 1h funding coins (removed 1h coin block).
+pub const SKIP_1H_FUNDING_COINS: bool = false;
 
 /// Taker fee rates per exchange (VIP-0, market order).
 pub fn taker_fee(exchange: crate::price_store::Exchange) -> f64 {
